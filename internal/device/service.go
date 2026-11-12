@@ -62,7 +62,12 @@ func (s *Service) Create(ctx context.Context, device Device) (*Device, error) {
 }
 
 func (s *Service) Get(ctx context.Context, id uuid.UUID) (*Device, error) {
-	panic("not implemented")
+	device, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get device %s: %w", id, err)
+	}
+
+	return device, nil
 }
 
 func (s *Service) List(

@@ -18,6 +18,7 @@ var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 type fakeRepository struct {
 	devices   map[uuid.UUID]Device
 	createErr error
+	getErr    error
 }
 
 func newFakeRepository() *fakeRepository {
@@ -32,8 +33,15 @@ func (f *fakeRepository) Create(_ context.Context, device Device) (*Device, erro
 	return &device, nil
 }
 
-func (f *fakeRepository) Get(context.Context, uuid.UUID) (*Device, error) {
-	return &Device{}, errors.New("not implemented")
+func (f *fakeRepository) Get(_ context.Context, id uuid.UUID) (*Device, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	device, ok := f.devices[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &device, nil
 }
 
 func (f *fakeRepository) List(context.Context, Filter, PageRequest) ([]*Device, error) {
@@ -164,6 +172,72 @@ func TestServiceCreate(t *testing.T) {
 			}
 			if stored != *got {
 				t.Fatalf("stored device = %+v, want %+v", stored, got)
+			}
+		})
+	}
+}
+
+func TestServiceGet(t *testing.T) {
+	existing := Device{
+		ID:        uuid.Must(uuid.NewV7()),
+		Name:      "iPhone",
+		Brand:     "Apple",
+		State:     StateAvailable,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	tests := []struct {
+		name    string
+		id      uuid.UUID
+		getErr  error
+		want    Device
+		wantErr error
+	}{
+		{
+			name: "returns existing device",
+			id:   existing.ID,
+			want: existing,
+		},
+		{
+			name:    "returns not found for unknown id",
+			id:      uuid.Must(uuid.NewV7()),
+			wantErr: ErrNotFound,
+		},
+		{
+			name:    "returns repository error",
+			id:      existing.ID,
+			getErr:  errFake,
+			wantErr: errFake,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			repo.devices[existing.ID] = existing
+			repo.getErr = tc.getErr
+
+			svc := NewService(Config{Repo: repo})
+			got, err := svc.Get(context.Background(), tc.id)
+
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Get() error = %v, want %v", err, tc.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("Get() = %+v, want nil on error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Get() unexpected error: %v", err)
+			}
+
+			if got == nil {
+				t.Fatal("Get() returned a nil device")
+			}
+			if *got != tc.want {
+				t.Fatalf("Get() = %+v, want %+v", *got, tc.want)
 			}
 		})
 	}
