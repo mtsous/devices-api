@@ -16,13 +16,17 @@ type Filter struct {
 	State State
 }
 
+func (f Filter) HasSingleCriterion() bool {
+	return f.Brand == "" || f.State == ""
+}
+
 type PageRequest struct {
 	Size   int
 	Cursor uuid.UUID
 }
 
 type Page struct {
-	Devices []Device
+	Devices []*Device
 	Cursor  uuid.UUID
 }
 

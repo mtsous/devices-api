@@ -75,7 +75,39 @@ func (s *Service) List(
 	filter Filter,
 	page PageRequest,
 ) (*Page, error) {
-	panic("not implemented")
+	filter.Brand = strings.TrimSpace(filter.Brand)
+	if filter.State != "" && !filter.State.IsValid() {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidState, filter.State)
+	}
+
+	if !filter.HasSingleCriterion() {
+		return nil, fmt.Errorf("%w: filter by brand or state, not both", ErrInvalidInput)
+	}
+
+	size := page.Size
+	switch {
+	case size <= 0:
+		size = DefaultPageLimit
+	case size > MaxPageLimit:
+		size = MaxPageLimit
+	}
+
+	// Fetch one extra device to know whether a next page exists without a COUNT query.
+	devices, err := s.repo.List(ctx, filter, PageRequest{Size: size + 1, Cursor: page.Cursor})
+	if err != nil {
+		return nil, fmt.Errorf("list devices: %w", err)
+	}
+
+	result := &Page{Devices: devices}
+	if len(devices) > size {
+		result.Devices = devices[:size]
+		result.Cursor = devices[size-1].ID
+	}
+	if result.Devices == nil {
+		result.Devices = []*Device{}
+	}
+
+	return result, nil
 }
 
 func (s *Service) Update(

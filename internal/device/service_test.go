@@ -1,10 +1,12 @@
 package device
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
@@ -16,9 +18,13 @@ var errFake = errors.New("fake repository error")
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 type fakeRepository struct {
-	devices   map[uuid.UUID]Device
+	devices map[uuid.UUID]Device
+
 	createErr error
 	getErr    error
+	listErr   error
+
+	lastPageRequest PageRequest
 }
 
 func newFakeRepository() *fakeRepository {
@@ -44,8 +50,38 @@ func (f *fakeRepository) Get(_ context.Context, id uuid.UUID) (*Device, error) {
 	return &device, nil
 }
 
-func (f *fakeRepository) List(context.Context, Filter, PageRequest) ([]*Device, error) {
-	return nil, errors.New("not implemented")
+func (f *fakeRepository) List(_ context.Context, filter Filter, page PageRequest) ([]*Device, error) {
+	f.lastPageRequest = page
+
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+
+	matches := make([]Device, 0, len(f.devices))
+	for _, d := range f.devices {
+		if filter.Brand != "" && d.Brand != filter.Brand {
+			continue
+		}
+		if filter.State != "" && d.State != filter.State {
+			continue
+		}
+		if page.Cursor != uuid.Nil && bytes.Compare(d.ID[:], page.Cursor[:]) <= 0 {
+			continue
+		}
+		matches = append(matches, d)
+	}
+	slices.SortFunc(matches, func(a, b Device) int {
+		return bytes.Compare(a.ID[:], b.ID[:])
+	})
+
+	var result []*Device
+	for i := range matches {
+		if len(result) == page.Size {
+			break
+		}
+		result = append(result, &matches[i])
+	}
+	return result, nil
 }
 
 func (f *fakeRepository) Update(context.Context, Device) error {
@@ -238,6 +274,181 @@ func TestServiceGet(t *testing.T) {
 			}
 			if *got != tc.want {
 				t.Fatalf("Get() = %+v, want %+v", *got, tc.want)
+			}
+		})
+	}
+}
+
+func newTestDevices(t *testing.T, n int, brand string, state State) []Device {
+	t.Helper()
+	devices := make([]Device, n)
+	for i := range devices {
+		devices[i] = Device{
+			ID:        uuid.Must(uuid.NewV7()),
+			Name:      "device",
+			Brand:     brand,
+			State:     state,
+			CreatedAt: time.Now().UTC(),
+		}
+	}
+	return devices
+}
+
+func ids(devices []*Device) []uuid.UUID {
+	out := make([]uuid.UUID, len(devices))
+	for i, d := range devices {
+		out[i] = d.ID
+	}
+	return out
+}
+
+func valueIDs(devices []Device) []uuid.UUID {
+	out := make([]uuid.UUID, len(devices))
+	for i, d := range devices {
+		out[i] = d.ID
+	}
+	return out
+}
+
+func TestServiceList(t *testing.T) {
+	apple := newTestDevices(t, 3, "Apple", StateAvailable)
+	samsung := newTestDevices(t, 2, "Samsung", StateInUse)
+	all := append(append([]Device{}, apple...), samsung...)
+
+	tests := []struct {
+		name       string
+		filter     Filter
+		page       PageRequest
+		listErr    error
+		wantIDs    []uuid.UUID
+		wantCursor uuid.UUID
+		wantSize   int
+		wantErr    error
+	}{
+		{
+			name:     "returns all devices when no filter",
+			wantIDs:  valueIDs(all),
+			wantSize: DefaultPageLimit + 1,
+		},
+		{
+			name:     "filters by brand",
+			filter:   Filter{Brand: "Apple"},
+			wantIDs:  valueIDs(apple),
+			wantSize: DefaultPageLimit + 1,
+		},
+		{
+			name:     "trims brand filter",
+			filter:   Filter{Brand: "  Samsung "},
+			wantIDs:  valueIDs(samsung),
+			wantSize: DefaultPageLimit + 1,
+		},
+		{
+			name:     "filters by state",
+			filter:   Filter{State: StateInUse},
+			wantIDs:  valueIDs(samsung),
+			wantSize: DefaultPageLimit + 1,
+		},
+		{
+			name:       "returns cursor when more pages exist",
+			page:       PageRequest{Size: 2},
+			wantIDs:    valueIDs(all[:2]),
+			wantCursor: all[1].ID,
+			wantSize:   3,
+		},
+		{
+			name:       "continues from cursor",
+			page:       PageRequest{Size: 2, Cursor: all[1].ID},
+			wantIDs:    valueIDs(all[2:4]),
+			wantCursor: all[3].ID,
+			wantSize:   3,
+		},
+		{
+			name:     "last page has no cursor",
+			page:     PageRequest{Size: 2, Cursor: all[3].ID},
+			wantIDs:  valueIDs(all[4:]),
+			wantSize: 3,
+		},
+		{
+			name:     "exact page size has no cursor",
+			page:     PageRequest{Size: len(all)},
+			wantIDs:  valueIDs(all),
+			wantSize: len(all) + 1,
+		},
+		{
+			name:     "caps size at max",
+			page:     PageRequest{Size: MaxPageLimit + 50},
+			wantIDs:  valueIDs(all),
+			wantSize: MaxPageLimit + 1,
+		},
+		{
+			name:     "defaults negative size",
+			page:     PageRequest{Size: -1},
+			wantIDs:  valueIDs(all),
+			wantSize: DefaultPageLimit + 1,
+		}, {
+			name:     "returns empty slice when nothing matches",
+			filter:   Filter{Brand: "Nokia"},
+			wantIDs:  []uuid.UUID{},
+			wantSize: DefaultPageLimit + 1,
+		},
+		{
+			name:    "rejects brand and state together",
+			filter:  Filter{Brand: "Apple", State: StateInUse},
+			wantErr: ErrInvalidInput,
+		},
+		{
+			name:    "rejects invalid state filter",
+			filter:  Filter{State: "broken"},
+			wantErr: ErrInvalidState,
+		},
+		{
+			name:    "returns repository error",
+			listErr: errFake,
+			wantErr: errFake,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			for _, d := range all {
+				repo.devices[d.ID] = d
+			}
+			repo.listErr = tc.listErr
+
+			svc := NewService(Config{Repo: repo, Logger: discardLogger})
+			got, err := svc.List(context.Background(), tc.filter, tc.page)
+
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("List() error = %v, want %v", err, tc.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("List() = %+v, want nil on error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("List() unexpected error: %v", err)
+			}
+
+			if got == nil {
+				t.Fatal("List() returned a nil page")
+			}
+			if got.Devices == nil {
+				t.Fatal("List() Devices = nil, want empty slice")
+			}
+			if gotIDs := ids(got.Devices); !slices.Equal(gotIDs, tc.wantIDs) {
+				t.Fatalf("List() ids = %v, want %v", gotIDs, tc.wantIDs)
+			}
+			if got.Cursor != tc.wantCursor {
+				t.Fatalf("List() cursor = %v, want %v", got.Cursor, tc.wantCursor)
+			}
+			if got.HasNext() != (tc.wantCursor != uuid.Nil) {
+				t.Fatalf("HasNext() = %v, want %v", got.HasNext(), tc.wantCursor != uuid.Nil)
+			}
+			if repo.lastPageRequest.Size != tc.wantSize {
+				t.Fatalf("repository page size = %d, want %d", repo.lastPageRequest.Size, tc.wantSize)
 			}
 		})
 	}
