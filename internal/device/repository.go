@@ -31,13 +31,13 @@ func (p Page) HasNext() bool {
 }
 
 type Repository interface {
-	Create(ctx context.Context, device Device) error
-	Get(ctx context.Context, id uuid.UUID) (Device, error)
+	Create(ctx context.Context, device Device) (*Device, error)
+	Get(ctx context.Context, id uuid.UUID) (*Device, error)
 	List(
 		ctx context.Context,
 		filter Filter,
 		pageRequest PageRequest,
-	) ([]Device, error)
+	) ([]*Device, error)
 	Update(ctx context.Context, device Device) error
 	Delete(ctx context.Context, id uuid.UUID) error
 }
