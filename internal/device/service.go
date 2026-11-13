@@ -9,20 +9,18 @@ import (
 	"github.com/google/uuid"
 )
 
-type Config struct {
-	Repo   Repository
-	Logger *slog.Logger
-}
-
 type Service struct {
 	repo   Repository
 	logger *slog.Logger
 }
 
-func NewService(config Config) *Service {
+func NewService(
+	repo Repository,
+	logger *slog.Logger,
+) *Service {
 	return &Service{
-		repo:   config.Repo,
-		logger: config.Logger,
+		repo:   repo,
+		logger: logger,
 	}
 }
 

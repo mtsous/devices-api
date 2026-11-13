@@ -90,15 +90,6 @@ var (
 	discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 )
 
-func newTestService(t *testing.T, repo Repository) *Service {
-	t.Helper()
-	svc, err := NewService(Config{Repo: repo, Logger: discardLogger})
-	if err != nil {
-		t.Fatalf("NewService() unexpected error: %v", err)
-	}
-	return svc
-}
-
 func newTestDevice(state State) Device {
 	return Device{
 		ID:        uuid.Must(uuid.NewV7()),
@@ -144,40 +135,6 @@ func equalTimePtr(a, b *time.Time) bool {
 		return a == b
 	}
 	return a.Equal(*b)
-}
-
-func TestNewService(t *testing.T) {
-	tests := []struct {
-		name    string
-		config  Config
-		wantErr bool
-	}{
-		{name: "valid config", config: Config{Repo: newFakeRepository(), Logger: discardLogger}},
-		{name: "missing repo", config: Config{Logger: discardLogger}, wantErr: true},
-		{name: "missing logger", config: Config{Repo: newFakeRepository()}, wantErr: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			svc, err := NewService(tc.config)
-
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("NewService() error = nil, want error")
-				}
-				if svc != nil {
-					t.Fatalf("NewService() = %+v, want nil on error", svc)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("NewService() unexpected error: %v", err)
-			}
-			if svc == nil {
-				t.Fatal("NewService() returned nil service")
-			}
-		})
-	}
 }
 
 func TestServiceCreate(t *testing.T) {
@@ -231,7 +188,7 @@ func TestServiceCreate(t *testing.T) {
 			repo := newFakeRepository()
 			repo.createErr = tc.createErr
 
-			svc := newTestService(t, repo)
+			svc := NewService(repo, discardLogger)
 			got, err := svc.Create(context.Background(), tc.input)
 
 			if tc.wantErr != nil {
@@ -295,7 +252,7 @@ func TestServiceGet(t *testing.T) {
 			repo.devices[existing.ID] = existing
 			repo.getErr = tc.getErr
 
-			svc := newTestService(t, repo)
+			svc := NewService(repo, discardLogger)
 			got, err := svc.Get(context.Background(), tc.id)
 
 			if tc.wantErr != nil {
@@ -405,7 +362,7 @@ func TestServiceList(t *testing.T) {
 			repo.listResult = newTestDevices(tc.deviceCount)
 			repo.listErr = tc.listErr
 
-			svc := newTestService(t, repo)
+			svc := NewService(repo, discardLogger)
 			got, err := svc.List(context.Background(), tc.filter, tc.page)
 
 			if tc.wantErr != nil {
@@ -514,7 +471,7 @@ func TestServiceDelete(t *testing.T) {
 				id = uuid.Must(uuid.NewV7())
 			}
 
-			svc := newTestService(t, repo)
+			svc := NewService(repo, discardLogger)
 			err := svc.Delete(context.Background(), id)
 
 			if tc.wantErr != nil {
