@@ -23,11 +23,13 @@ type fakeRepository struct {
 	createErr error
 	getErr    error
 	listErr   error
+	updateErr error
 	deleteErr error
 
 	// Recorded calls.
 	createCalled    bool
 	listCalled      bool
+	updateCalled    bool
 	lastFilter      Filter
 	lastPageRequest PageRequest
 	deletedIDs      []uuid.UUID
@@ -69,8 +71,20 @@ func (f *fakeRepository) List(_ context.Context, filter Filter, page PageRequest
 	return f.listResult[:min(page.Size, len(f.listResult))], nil
 }
 
-func (f *fakeRepository) Update(context.Context, uuid.UUID, func(d *Device) error) (*Device, error) {
-	return nil, errors.New("not implemented")
+func (f *fakeRepository) Update(_ context.Context, id uuid.UUID, fn func(d *Device) error) (*Device, error) {
+	f.updateCalled = true
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	device, ok := f.devices[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if err := fn(&device); err != nil {
+		return nil, err
+	}
+	f.devices[id] = device
+	return &device, nil
 }
 
 func (f *fakeRepository) Delete(_ context.Context, id uuid.UUID) error {
@@ -460,6 +474,169 @@ func TestServiceDelete(t *testing.T) {
 			if want := []uuid.UUID{device.ID}; !slices.Equal(repo.deletedIDs, want) {
 				t.Fatalf("repository Delete called with %v, want %v", repo.deletedIDs, want)
 			}
+		})
+	}
+}
+
+func TestServiceUpdate(t *testing.T) {
+	tests := []struct {
+		name      string
+		stored    Device
+		params    UpdateParams
+		unknownID bool
+		updateErr error
+
+		want           func(stored Device) Device
+		wantErr        error
+		wantRepoCalled bool
+	}{
+		{
+			name:   "updates only sent fields",
+			stored: newTestDevice(StateAvailable),
+			params: UpdateParams{Name: new("Galaxy")},
+			want: func(d Device) Device {
+				d.Name = "Galaxy"
+				return d
+			},
+			wantRepoCalled: true,
+		},
+		{
+			name:   "updates all fields",
+			stored: newTestDevice(StateAvailable),
+			params: UpdateParams{Name: new("Galaxy"), Brand: new("Samsung"), State: new(StateInUse)},
+			want: func(d Device) Device {
+				d.Name, d.Brand, d.State = "Galaxy", "Samsung", StateInUse
+				return d
+			},
+			wantRepoCalled: true,
+		},
+		{
+			name:   "trims name and brand",
+			stored: newTestDevice(StateAvailable),
+			params: UpdateParams{Name: new("  Galaxy "), Brand: new(" Samsung  ")},
+			want: func(d Device) Device {
+				d.Name, d.Brand = "Galaxy", "Samsung"
+				return d
+			},
+			wantRepoCalled: true,
+		},
+		{
+			name:   "changes state of in-use device",
+			stored: newTestDevice(StateInUse),
+			params: UpdateParams{State: new(StateAvailable)},
+			want: func(d Device) Device {
+				d.State = StateAvailable
+				return d
+			},
+			wantRepoCalled: true,
+		},
+		{
+			name:   "allows unchanged name and brand while in use",
+			stored: newTestDevice(StateInUse),
+			params: UpdateParams{Name: new("iPhone"), Brand: new("Apple"), State: new(StateInactive)},
+			want: func(d Device) Device {
+				d.State = StateInactive
+				return d
+			},
+			wantRepoCalled: true,
+		},
+		{
+			name:           "rejects name change while in use",
+			stored:         newTestDevice(StateInUse),
+			params:         UpdateParams{Name: new("Galaxy")},
+			wantErr:        ErrInUse,
+			wantRepoCalled: true,
+		},
+		{
+			name:           "rejects brand change while in use",
+			stored:         newTestDevice(StateInUse),
+			params:         UpdateParams{Brand: new("Samsung")},
+			wantErr:        ErrInUse,
+			wantRepoCalled: true,
+		},
+		{
+			name:           "rejects name change while in use even when leaving in-use",
+			stored:         newTestDevice(StateInUse),
+			params:         UpdateParams{Name: new("Galaxy"), State: new(StateAvailable)},
+			wantErr:        ErrInUse,
+			wantRepoCalled: true,
+		},
+		{
+			name:           "rejects empty name",
+			stored:         newTestDevice(StateAvailable),
+			params:         UpdateParams{Name: new("  ")},
+			wantErr:        ErrInvalidInput,
+			wantRepoCalled: true,
+		},
+		{
+			name:           "rejects invalid state",
+			stored:         newTestDevice(StateAvailable),
+			params:         UpdateParams{State: new(State("broken"))},
+			wantErr:        ErrInvalidState,
+			wantRepoCalled: true,
+		},
+		{
+			name:    "rejects empty update",
+			stored:  newTestDevice(StateAvailable),
+			wantErr: ErrInvalidInput,
+		},
+		{
+			name:           "returns not found for unknown id",
+			stored:         newTestDevice(StateAvailable),
+			params:         UpdateParams{Name: new("Galaxy")},
+			unknownID:      true,
+			wantErr:        ErrNotFound,
+			wantRepoCalled: true,
+		},
+		{
+			name:           "returns repository error",
+			stored:         newTestDevice(StateAvailable),
+			params:         UpdateParams{Name: new("Galaxy")},
+			updateErr:      errFakeRepo,
+			wantErr:        errFakeRepo,
+			wantRepoCalled: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			repo.devices[tc.stored.ID] = tc.stored
+			repo.updateErr = tc.updateErr
+
+			id := tc.stored.ID
+			if tc.unknownID {
+				id = uuid.Must(uuid.NewV7())
+			}
+
+			svc := NewService(repo, discardLogger)
+			got, err := svc.Update(context.Background(), id, tc.params)
+
+			if repo.updateCalled != tc.wantRepoCalled {
+				t.Fatalf("repository Update called = %v, want %v", repo.updateCalled, tc.wantRepoCalled)
+			}
+
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Update() error = %v, want %v", err, tc.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("Update() = %s, want nil on error", got)
+				}
+				// A rejected update must leave the stored device untouched.
+				assertDeviceEqual(t, repo.devices[tc.stored.ID], tc.stored)
+				return
+			}
+			if err != nil {
+				t.Fatalf("Update() unexpected error: %v", err)
+			}
+			if got == nil {
+				t.Fatal("Update() returned a nil device")
+			}
+
+			want := tc.want(tc.stored)
+			assertDeviceEqual(t, *got, want)
+			assertDeviceEqual(t, repo.devices[tc.stored.ID], want)
 		})
 	}
 }
