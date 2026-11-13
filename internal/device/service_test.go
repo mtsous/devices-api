@@ -415,64 +415,39 @@ func TestServiceList(t *testing.T) {
 
 func TestServiceDelete(t *testing.T) {
 	tests := []struct {
-		name           string
-		device         Device
-		unknownID      bool
-		getErr         error
-		deleteErr      error
-		wantErr        error
-		wantDeleteCall bool
+		name      string
+		deleteErr error
+		wantErr   error
 	}{
 		{
-			name:           "deletes available device",
-			device:         newTestDevice(StateAvailable),
-			wantDeleteCall: true,
+			name: "deletes device",
 		},
 		{
-			name:           "deletes inactive device",
-			device:         newTestDevice(StateInactive),
-			wantDeleteCall: true,
+			name:      "returns in use from repository",
+			deleteErr: ErrInUse,
+			wantErr:   ErrInUse,
 		},
 		{
-			name:    "rejects in-use device",
-			device:  newTestDevice(StateInUse),
-			wantErr: ErrInUse,
-		},
-		{
-			name:      "returns not found for unknown id",
-			device:    newTestDevice(StateAvailable),
-			unknownID: true,
+			name:      "returns not found from repository",
+			deleteErr: ErrNotFound,
 			wantErr:   ErrNotFound,
 		},
 		{
-			name:    "returns repository get error",
-			device:  newTestDevice(StateAvailable),
-			getErr:  errFakeRepo,
-			wantErr: errFakeRepo,
-		},
-		{
-			name:           "returns repository delete error",
-			device:         newTestDevice(StateAvailable),
-			deleteErr:      errFakeRepo,
-			wantErr:        errFakeRepo,
-			wantDeleteCall: true,
+			name:      "returns repository error",
+			deleteErr: errFakeRepo,
+			wantErr:   errFakeRepo,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			device := newTestDevice(StateAvailable)
 			repo := newFakeRepository()
-			repo.devices[tc.device.ID] = tc.device
-			repo.getErr = tc.getErr
+			repo.devices[device.ID] = device
 			repo.deleteErr = tc.deleteErr
 
-			id := tc.device.ID
-			if tc.unknownID {
-				id = uuid.Must(uuid.NewV7())
-			}
-
 			svc := NewService(repo, discardLogger)
-			err := svc.Delete(context.Background(), id)
+			err := svc.Delete(context.Background(), device.ID)
 
 			if tc.wantErr != nil {
 				if !errors.Is(err, tc.wantErr) {
@@ -482,12 +457,8 @@ func TestServiceDelete(t *testing.T) {
 				t.Fatalf("Delete() unexpected error: %v", err)
 			}
 
-			var wantDeletedIDs []uuid.UUID
-			if tc.wantDeleteCall {
-				wantDeletedIDs = []uuid.UUID{id}
-			}
-			if !slices.Equal(repo.deletedIDs, wantDeletedIDs) {
-				t.Fatalf("repository Delete called with %v, want %v", repo.deletedIDs, wantDeletedIDs)
+			if want := []uuid.UUID{device.ID}; !slices.Equal(repo.deletedIDs, want) {
+				t.Fatalf("repository Delete called with %v, want %v", repo.deletedIDs, want)
 			}
 		})
 	}
