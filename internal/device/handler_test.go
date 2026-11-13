@@ -20,6 +20,12 @@ type fakeService struct {
 
 	createCalled bool
 	lastCreate   Device
+
+	device *Device
+	getErr error
+
+	getCalled bool
+	lastGetID uuid.UUID
 }
 
 func (f *fakeService) Create(_ context.Context, device Device) (*Device, error) {
@@ -29,6 +35,15 @@ func (f *fakeService) Create(_ context.Context, device Device) (*Device, error) 
 		return nil, f.createErr
 	}
 	return f.created, nil
+}
+
+func (f *fakeService) Get(_ context.Context, id uuid.UUID) (*Device, error) {
+	f.getCalled = true
+	f.lastGetID = id
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	return f.device, nil
 }
 
 func newTestMux(svc deviceService) *http.ServeMux {
@@ -169,6 +184,112 @@ func TestHandlerCreate(t *testing.T) {
 				"brand":      "Apple",
 				"state":      "available",
 				"created_at": "2026-01-01T12:00:00Z",
+			}
+			if len(got) != len(want) {
+				t.Fatalf("response = %v, want %v", got, want)
+			}
+			for k, v := range want {
+				if got[k] != v {
+					t.Fatalf("response[%q] = %v, want %v", k, got[k], v)
+				}
+			}
+		})
+	}
+}
+
+func TestHandlerGet(t *testing.T) {
+	updatedAt := time.Date(2026, 2, 1, 8, 30, 0, 0, time.UTC)
+	device := &Device{
+		ID:        uuid.Must(uuid.NewV7()),
+		Name:      "Pixel",
+		Brand:     "Google",
+		State:     StateInUse,
+		CreatedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		UpdatedAt: &updatedAt,
+	}
+
+	tests := []struct {
+		name   string
+		id     string
+		getErr error
+
+		wantStatus      int
+		wantCalled      bool
+		wantErrContains string
+	}{
+		{
+			name:       "returns device",
+			id:         device.ID.String(),
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+		},
+		{
+			name:            "rejects malformed id",
+			id:              "not-a-uuid",
+			wantStatus:      http.StatusBadRequest,
+			wantErrContains: "invalid device id",
+		},
+		{
+			name:            "maps not found to 404",
+			id:              device.ID.String(),
+			getErr:          fmt.Errorf("get device %s: %w", device.ID, ErrNotFound),
+			wantStatus:      http.StatusNotFound,
+			wantCalled:      true,
+			wantErrContains: "device not found",
+		},
+		{
+			name:            "hides unexpected errors",
+			id:              device.ID.String(),
+			getErr:          errors.New("connection refused"),
+			wantStatus:      http.StatusInternalServerError,
+			wantCalled:      true,
+			wantErrContains: "internal server error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeService{device: device, getErr: tc.getErr}
+			req := httptest.NewRequest(http.MethodGet, "/devices/"+tc.id, nil)
+			rec := httptest.NewRecorder()
+
+			newTestMux(svc).ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got)
+			}
+			if svc.getCalled != tc.wantCalled {
+				t.Fatalf("service Get called = %v, want %v", svc.getCalled, tc.wantCalled)
+			}
+			if tc.wantCalled && svc.lastGetID != device.ID {
+				t.Fatalf("service Get id = %s, want %s", svc.lastGetID, device.ID)
+			}
+
+			if tc.wantErrContains != "" {
+				var body errorResponse
+				if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+					t.Fatalf("decode error body: %v", err)
+				}
+				if body.Error != tc.wantErrContains {
+					t.Fatalf("error = %q, want %q", body.Error, tc.wantErrContains)
+				}
+				return
+			}
+
+			var got map[string]any
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			want := map[string]any{
+				"id":         device.ID.String(),
+				"name":       "Pixel",
+				"brand":      "Google",
+				"state":      "in-use",
+				"created_at": "2026-01-01T12:00:00Z",
+				"updated_at": "2026-02-01T08:30:00Z",
 			}
 			if len(got) != len(want) {
 				t.Fatalf("response = %v, want %v", got, want)
