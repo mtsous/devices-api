@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -75,6 +76,72 @@ func TestDeviceRepositoryCreate(t *testing.T) {
 
 		if _, err := repo.Create(ctx, input); err == nil {
 			t.Fatal("second Create() error = nil, want error")
+		}
+	})
+}
+
+func TestDeviceRepositoryGet(t *testing.T) {
+	repo := newTestRepository(t)
+	ctx := context.Background()
+
+	stored, err := repo.Create(ctx, device.Device{
+		ID:    uuid.Must(uuid.NewV7()),
+		Name:  "iPhone",
+		Brand: "Apple",
+		State: device.StateAvailable,
+	})
+	if err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+
+	deleted, err := repo.Create(ctx, device.Device{
+		ID:    uuid.Must(uuid.NewV7()),
+		Name:  "Pixel",
+		Brand: "Google",
+		State: device.StateInactive,
+	})
+	if err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+	if _, err := repo.pool.Exec(
+		ctx,
+		"UPDATE devices SET deleted_at = now() WHERE id = $1",
+		deleted.ID,
+	); err != nil {
+		t.Fatalf("soft delete device: %v", err)
+	}
+
+	t.Run("returns stored device", func(t *testing.T) {
+		got, err := repo.Get(ctx, stored.ID)
+		if err != nil {
+			t.Fatalf("Get() unexpected error: %v", err)
+		}
+		if got.ID != stored.ID ||
+			got.Name != stored.Name ||
+			got.Brand != stored.Brand ||
+			got.State != stored.State ||
+			!got.CreatedAt.Equal(stored.CreatedAt) {
+			t.Fatalf("Get() = %s, want %s", got, stored)
+		}
+	})
+
+	t.Run("returns not found for unknown id", func(t *testing.T) {
+		got, err := repo.Get(ctx, uuid.Must(uuid.NewV7()))
+		if !errors.Is(err, device.ErrNotFound) {
+			t.Fatalf("Get() error = %v, want %v", err, device.ErrNotFound)
+		}
+		if got != nil {
+			t.Fatalf("Get() = %s, want nil", got)
+		}
+	})
+
+	t.Run("returns not found for deleted device", func(t *testing.T) {
+		got, err := repo.Get(ctx, deleted.ID)
+		if !errors.Is(err, device.ErrNotFound) {
+			t.Fatalf("Get() error = %v, want %v", err, device.ErrNotFound)
+		}
+		if got != nil {
+			t.Fatalf("Get() = %s, want nil", got)
 		}
 	})
 }

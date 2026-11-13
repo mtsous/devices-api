@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mtsous/devices-api/internal/device"
@@ -48,8 +49,29 @@ func (r *DeviceRepository) Create(ctx context.Context, d device.Device) (*device
 	return &created, nil
 }
 
-func (r *DeviceRepository) Get(context.Context, uuid.UUID) (*device.Device, error) {
-	return nil, errors.New("not implemented")
+func (r *DeviceRepository) Get(ctx context.Context, id uuid.UUID) (*device.Device, error) {
+	const query = `
+		SELECT id, name, brand, state, created_at, updated_at, deleted_at
+		FROM devices
+		WHERE id = $1 AND deleted_at IS NULL`
+
+	var found device.Device
+	err := r.pool.QueryRow(ctx, query, id).Scan(
+		&found.ID,
+		&found.Name,
+		&found.Brand,
+		&found.State,
+		&found.CreatedAt,
+		&found.UpdatedAt,
+		&found.DeletedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, device.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select device: %w", err)
+	}
+	return &found, nil
 }
 
 func (r *DeviceRepository) List(context.Context, device.Filter, device.PageRequest) ([]*device.Device, error) {
