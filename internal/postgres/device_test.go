@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -388,4 +389,105 @@ func TestDeviceRepositoryUpdate(t *testing.T) {
 			t.Fatalf("fn saw state %q, want %q committed by the other transaction", seenState, device.StateInUse)
 		}
 	})
+}
+
+func TestDeviceRepositoryList(t *testing.T) {
+	repo := newTestRepository(t)
+	ctx := context.Background()
+
+	create := func(brand string, state device.State) uuid.UUID {
+		t.Helper()
+		d, err := repo.Create(ctx, device.Device{
+			ID:    uuid.Must(uuid.NewV7()),
+			Name:  "device",
+			Brand: brand,
+			State: state,
+		})
+		if err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+		return d.ID
+	}
+
+	// UUIDv7 ids are created in increasing order, which is also the list order.
+	apple1 := create("Apple", device.StateAvailable)
+	samsung1 := create("Samsung", device.StateInUse)
+	apple2 := create("Apple", device.StateInUse)
+	deleted := create("Apple", device.StateAvailable)
+	samsung2 := create("Samsung", device.StateInactive)
+	if err := repo.Delete(ctx, deleted); err != nil {
+		t.Fatalf("Delete() unexpected error: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		filter  device.Filter
+		page    device.PageRequest
+		wantIDs []uuid.UUID
+	}{
+		{
+			name:    "lists active devices in id order",
+			page:    device.PageRequest{Size: 10},
+			wantIDs: []uuid.UUID{apple1, samsung1, apple2, samsung2},
+		},
+		{
+			name:    "filters by brand",
+			filter:  device.Filter{Brand: "Apple"},
+			page:    device.PageRequest{Size: 10},
+			wantIDs: []uuid.UUID{apple1, apple2},
+		},
+		{
+			name:    "filters by state",
+			filter:  device.Filter{State: device.StateInUse},
+			page:    device.PageRequest{Size: 10},
+			wantIDs: []uuid.UUID{samsung1, apple2},
+		},
+		{
+			name:    "limits page size",
+			page:    device.PageRequest{Size: 2},
+			wantIDs: []uuid.UUID{apple1, samsung1},
+		},
+		{
+			name:    "continues after cursor",
+			page:    device.PageRequest{Size: 2, Cursor: samsung1},
+			wantIDs: []uuid.UUID{apple2, samsung2},
+		},
+		{
+			name:    "combines filter and cursor",
+			filter:  device.Filter{Brand: "Samsung"},
+			page:    device.PageRequest{Size: 10, Cursor: samsung1},
+			wantIDs: []uuid.UUID{samsung2},
+		},
+		{
+			name:    "returns nothing past the last device",
+			page:    device.PageRequest{Size: 10, Cursor: samsung2},
+			wantIDs: nil,
+		},
+		{
+			name:    "returns nothing for unknown brand",
+			filter:  device.Filter{Brand: "Nokia"},
+			page:    device.PageRequest{Size: 10},
+			wantIDs: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repo.List(ctx, tc.filter, tc.page)
+			if err != nil {
+				t.Fatalf("List() unexpected error: %v", err)
+			}
+
+			var gotIDs []uuid.UUID
+			for _, d := range got {
+				gotIDs = append(gotIDs, d.ID)
+				if d.DeletedAt != nil {
+					t.Fatalf("List() returned deleted device %s", d)
+				}
+			}
+			if !slices.Equal(gotIDs, tc.wantIDs) {
+				t.Fatalf("List() ids = %v, want %v", gotIDs, tc.wantIDs)
+			}
+		})
+	}
 }

@@ -74,8 +74,59 @@ func (r *DeviceRepository) Get(ctx context.Context, id uuid.UUID) (*device.Devic
 	return &found, nil
 }
 
-func (r *DeviceRepository) List(context.Context, device.Filter, device.PageRequest) ([]*device.Device, error) {
-	return nil, errors.New("not implemented")
+func (r *DeviceRepository) List(
+	ctx context.Context,
+	filter device.Filter,
+	page device.PageRequest,
+) ([]*device.Device, error) {
+	query := `
+		SELECT id, name, brand, state, created_at, updated_at, deleted_at
+		FROM devices
+		WHERE deleted_at IS NULL`
+	var args []any
+	addCondition := func(condition string, value any) {
+		args = append(args, value)
+		query += fmt.Sprintf(" AND "+condition, len(args))
+	}
+
+	if filter.Brand != "" {
+		addCondition("brand = $%d", filter.Brand)
+	}
+	if filter.State != "" {
+		addCondition("state = $%d", filter.State)
+	}
+	if page.Cursor != uuid.Nil {
+		addCondition("id > $%d", page.Cursor)
+	}
+	args = append(args, page.Size)
+	query += fmt.Sprintf(" ORDER BY id LIMIT $%d", len(args))
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("select devices: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []*device.Device
+	for rows.Next() {
+		var d device.Device
+		if err := rows.Scan(
+			&d.ID,
+			&d.Name,
+			&d.Brand,
+			&d.State,
+			&d.CreatedAt,
+			&d.UpdatedAt,
+			&d.DeletedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan device: %w", err)
+		}
+		devices = append(devices, &d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate devices: %w", err)
+	}
+	return devices, nil
 }
 
 func (r *DeviceRepository) Update(
