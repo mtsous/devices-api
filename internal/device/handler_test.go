@@ -27,6 +27,13 @@ type fakeService struct {
 	getCalled bool
 	lastGetID uuid.UUID
 
+	updated   *Device
+	updateErr error
+
+	updateCalled bool
+	lastUpdateID uuid.UUID
+	lastUpdate   UpdateParams
+
 	deleteErr error
 
 	deleteCalled bool
@@ -51,8 +58,14 @@ func (f *fakeService) Get(_ context.Context, id uuid.UUID) (*Device, error) {
 	return f.device, nil
 }
 
-func (f *fakeService) Update(context.Context, uuid.UUID, UpdateParams) (*Device, error) {
-	return nil, errors.New("not implemented")
+func (f *fakeService) Update(_ context.Context, id uuid.UUID, params UpdateParams) (*Device, error) {
+	f.updateCalled = true
+	f.lastUpdateID = id
+	f.lastUpdate = params
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	return f.updated, nil
 }
 
 func (f *fakeService) Delete(_ context.Context, id uuid.UUID) error {
@@ -65,6 +78,27 @@ func newTestMux(svc deviceService) *http.ServeMux {
 	mux := http.NewServeMux()
 	NewHandler(svc, discardLogger).RegisterRoutes(mux)
 	return mux
+}
+
+func formatParams(p UpdateParams) string {
+	show := func(v any, isNil bool) string {
+		if isNil {
+			return "<nil>"
+		}
+		return fmt.Sprintf("%q", v)
+	}
+	return fmt.Sprintf("{Name:%s Brand:%s State:%s}",
+		show(deref(p.Name), p.Name == nil),
+		show(deref(p.Brand), p.Brand == nil),
+		show(deref(p.State), p.State == nil))
+}
+
+func deref[T any](p *T) T {
+	var zero T
+	if p == nil {
+		return zero
+	}
+	return *p
 }
 
 func TestHandlerCreate(t *testing.T) {
@@ -398,6 +432,178 @@ func TestHandlerDelete(t *testing.T) {
 			}
 			if body.Error != tc.wantError {
 				t.Fatalf("error = %q, want %q", body.Error, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestHandlerUpdate(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+	updatedAt := time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC)
+	updated := &Device{
+		ID:        id,
+		Name:      "Galaxy",
+		Brand:     "Samsung",
+		State:     StateInactive,
+		CreatedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		UpdatedAt: &updatedAt,
+	}
+
+	tests := []struct {
+		name      string
+		id        string
+		body      string
+		updateErr error
+
+		wantStatus int
+		wantParams *UpdateParams
+		wantError  string
+	}{
+		{
+			name:       "updates only name",
+			id:         id.String(),
+			body:       `{"name":"Galaxy"}`,
+			wantStatus: http.StatusOK,
+			wantParams: &UpdateParams{Name: new("Galaxy")},
+		},
+		{
+			name:       "updates only brand",
+			id:         id.String(),
+			body:       `{"brand":"Samsung"}`,
+			wantStatus: http.StatusOK,
+			wantParams: &UpdateParams{Brand: new("Samsung")},
+		},
+		{
+			name:       "updates only state",
+			id:         id.String(),
+			body:       `{"state":"available"}`,
+			wantStatus: http.StatusOK,
+			wantParams: &UpdateParams{State: new(StateAvailable)},
+		},
+		{
+			name:       "updates all fields",
+			id:         id.String(),
+			body:       `{"name":"Galaxy","brand":"Samsung","state":"inactive"}`,
+			wantStatus: http.StatusOK,
+			wantParams: &UpdateParams{Name: new("Galaxy"), Brand: new("Samsung"), State: new(StateInactive)},
+		},
+		{
+			name:       "passes empty string as sent",
+			id:         id.String(),
+			body:       `{"brand":""}`,
+			updateErr:  fmt.Errorf("%w: brand is required", ErrInvalidInput),
+			wantStatus: http.StatusBadRequest,
+			wantParams: &UpdateParams{Brand: new("")},
+			wantError:  "invalid device input: brand is required",
+		},
+		{
+			name:       "rejects malformed id",
+			id:         "not-a-uuid",
+			body:       `{"name":"Galaxy"}`,
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid device id",
+		},
+		{
+			name:       "rejects malformed json",
+			id:         id.String(),
+			body:       `{"name":`,
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid request body",
+		},
+		{
+			name:       "rejects created_at",
+			id:         id.String(),
+			body:       `{"created_at":"2020-01-01T00:00:00Z"}`,
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid request body",
+		},
+		{
+			name:       "maps not found to 404",
+			id:         id.String(),
+			body:       `{"name":"Galaxy"}`,
+			updateErr:  fmt.Errorf("update device %s: %w", id, ErrNotFound),
+			wantStatus: http.StatusNotFound,
+			wantParams: &UpdateParams{Name: new("Galaxy")},
+			wantError:  "device not found",
+		},
+		{
+			name:       "maps in use to 409",
+			id:         id.String(),
+			body:       `{"brand":"Samsung"}`,
+			updateErr:  fmt.Errorf("update device %s: %w", id, ErrInUse),
+			wantStatus: http.StatusConflict,
+			wantParams: &UpdateParams{Brand: new("Samsung")},
+			wantError:  "device is in use",
+		},
+		{
+			name:       "hides unexpected errors",
+			id:         id.String(),
+			body:       `{"name":"Galaxy"}`,
+			updateErr:  errors.New("connection refused"),
+			wantStatus: http.StatusInternalServerError,
+			wantParams: &UpdateParams{Name: new("Galaxy")},
+			wantError:  "internal server error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeService{updated: updated, updateErr: tc.updateErr}
+			req := httptest.NewRequest(http.MethodPatch, "/devices/"+tc.id, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+
+			newTestMux(svc).ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got)
+			}
+
+			if tc.wantParams == nil {
+				if svc.updateCalled {
+					t.Fatal("service Update called, want request rejected first")
+				}
+			} else {
+				if svc.lastUpdateID != id {
+					t.Fatalf("service Update id = %s, want %s", svc.lastUpdateID, id)
+				}
+				if got, want := formatParams(svc.lastUpdate), formatParams(*tc.wantParams); got != want {
+					t.Fatalf("service Update params = %s, want %s", got, want)
+				}
+			}
+
+			if tc.wantError != "" {
+				var body errorResponse
+				if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+					t.Fatalf("decode error body: %v", err)
+				}
+				if body.Error != tc.wantError {
+					t.Fatalf("error = %q, want %q", body.Error, tc.wantError)
+				}
+				return
+			}
+
+			var got map[string]any
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			want := map[string]any{
+				"id":         id.String(),
+				"name":       "Galaxy",
+				"brand":      "Samsung",
+				"state":      "inactive",
+				"created_at": "2026-01-01T12:00:00Z",
+				"updated_at": "2026-03-01T09:00:00Z",
+			}
+			if len(got) != len(want) {
+				t.Fatalf("response = %v, want %v", got, want)
+			}
+			for k, v := range want {
+				if got[k] != v {
+					t.Fatalf("response[%q] = %v, want %v", k, got[k], v)
+				}
 			}
 		})
 	}
