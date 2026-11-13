@@ -44,12 +44,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// The pool connects lazily on the first query.
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("create database pool: %w", err)
 	}
 	defer pool.Close()
+
+	if err := postgres.Migrate(ctx, pool); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
 
 	repo := postgres.NewDeviceRepository(pool)
 

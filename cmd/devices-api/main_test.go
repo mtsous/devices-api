@@ -9,21 +9,24 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/mtsous/devices-api/internal/health"
+	"github.com/mtsous/devices-api/internal/router"
 )
 
-func TestRunShutsDownGracefully(t *testing.T) {
+func TestServeShutsDownGracefully(t *testing.T) {
 	port := freePort(t)
-	t.Setenv("PORT", strconv.Itoa(port))
-
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := &http.Server{
+		Addr:    ":" + strconv.Itoa(port),
+		Handler: router.New(health.NewHandler(logger)),
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() {
-		done <- run(ctx, logger)
-	}()
+	go func() { done <- serve(ctx, srv, logger) }()
 
 	waitForHealthy(t, "http://localhost:"+strconv.Itoa(port)+"/healthz")
 
