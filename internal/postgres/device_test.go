@@ -270,3 +270,153 @@ func TestDeviceRepositoryDelete(t *testing.T) {
 		}
 	})
 }
+
+func TestDeviceRepositoryUpdate(t *testing.T) {
+	repo := newTestRepository(t)
+	ctx := context.Background()
+
+	create := func(t *testing.T, state device.State) *device.Device {
+		t.Helper()
+		d, err := repo.Create(ctx, device.Device{
+			ID:    uuid.Must(uuid.NewV7()),
+			Name:  "iPhone",
+			Brand: "Apple",
+			State: state,
+		})
+		if err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+		return d
+	}
+
+	t.Run("saves changes and sets updated_at", func(t *testing.T) {
+		d := create(t, device.StateAvailable)
+
+		got, err := repo.Update(ctx, d.ID, func(dd *device.Device) error {
+			dd.Name = "Galaxy"
+			dd.Brand = "Samsung"
+			dd.State = device.StateInUse
+			dd.CreatedAt = dd.CreatedAt.AddDate(-10, 0, 0) // must not be written
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("Update() unexpected error: %v", err)
+		}
+
+		if got.Name != "Galaxy" || got.Brand != "Samsung" || got.State != device.StateInUse {
+			t.Fatalf("Update() = %s, want name Galaxy, brand Samsung, state in-use", got)
+		}
+		if !got.CreatedAt.Equal(d.CreatedAt) {
+			t.Fatalf("CreatedAt = %v, want unchanged %v", got.CreatedAt, d.CreatedAt)
+		}
+		if got.UpdatedAt == nil || !got.UpdatedAt.After(d.CreatedAt) {
+			t.Fatalf("UpdatedAt = %v, want set after CreatedAt %v", got.UpdatedAt, d.CreatedAt)
+		}
+
+		stored, err := repo.Get(ctx, d.ID)
+		if err != nil {
+			t.Fatalf("Get() unexpected error: %v", err)
+		}
+		if stored.Name != got.Name || stored.Brand != got.Brand || stored.State != got.State ||
+			!stored.CreatedAt.Equal(d.CreatedAt) || !stored.UpdatedAt.Equal(*got.UpdatedAt) {
+			t.Fatalf("stored = %s, want %s", stored, got)
+		}
+	})
+
+	t.Run("does not save when fn returns an error", func(t *testing.T) {
+		d := create(t, device.StateInUse)
+		errRejected := errors.New("rejected")
+
+		got, err := repo.Update(ctx, d.ID, func(x *device.Device) error {
+			x.Name = "Galaxy"
+			return errRejected
+		})
+		if !errors.Is(err, errRejected) {
+			t.Fatalf("Update() error = %v, want %v", err, errRejected)
+		}
+		if got != nil {
+			t.Fatalf("Update() = %s, want nil on error", got)
+		}
+
+		stored, err := repo.Get(ctx, d.ID)
+		if err != nil {
+			t.Fatalf("Get() unexpected error: %v", err)
+		}
+		if stored.Name != "iPhone" || stored.UpdatedAt != nil {
+			t.Fatalf("stored = %s, want unchanged", stored)
+		}
+	})
+
+	t.Run("returns not found for unknown id", func(t *testing.T) {
+		called := false
+		_, err := repo.Update(ctx, uuid.Must(uuid.NewV7()), func(*device.Device) error {
+			called = true
+			return nil
+		})
+		if !errors.Is(err, device.ErrNotFound) {
+			t.Fatalf("Update() error = %v, want %v", err, device.ErrNotFound)
+		}
+		if called {
+			t.Fatal("fn called for unknown id")
+		}
+	})
+
+	t.Run("returns not found for deleted device", func(t *testing.T) {
+		d := create(t, device.StateAvailable)
+		if err := repo.Delete(ctx, d.ID); err != nil {
+			t.Fatalf("Delete() unexpected error: %v", err)
+		}
+
+		_, err := repo.Update(ctx, d.ID, func(*device.Device) error { return nil })
+		if !errors.Is(err, device.ErrNotFound) {
+			t.Fatalf("Update() error = %v, want %v", err, device.ErrNotFound)
+		}
+	})
+
+	t.Run("waits for a concurrent state change", func(t *testing.T) {
+		d := create(t, device.StateAvailable)
+
+		// Another transaction puts the device in use, but has not committed yet.
+		other, err := repo.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin other transaction: %v", err)
+		}
+		defer other.Rollback(ctx)
+
+		var otherPID int
+		if err := other.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&otherPID); err != nil {
+			t.Fatalf("get other transaction pid: %v", err)
+		}
+		if _, err := other.Exec(ctx, `UPDATE devices SET state = 'in-use' WHERE id = $1`, d.ID); err != nil {
+			t.Fatalf("update in other transaction: %v", err)
+		}
+
+		var seenState device.State
+		done := make(chan error, 1)
+		go func() {
+			_, err := repo.Update(ctx, d.ID, func(x *device.Device) error {
+				seenState = x.State
+				return nil
+			})
+			done <- err
+		}()
+
+		waitUntilBlockedBy(t, repo.pool, otherPID, done)
+
+		if err := other.Commit(ctx); err != nil {
+			t.Fatalf("commit other transaction: %v", err)
+		}
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("Update() unexpected error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Update() did not return after the lock was released")
+		}
+		if seenState != device.StateInUse {
+			t.Fatalf("fn saw state %q, want %q committed by the other transaction", seenState, device.StateInUse)
+		}
+	})
+}
