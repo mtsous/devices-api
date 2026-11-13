@@ -82,6 +82,35 @@ func (r *DeviceRepository) Update(context.Context, device.Device) error {
 	return errors.New("not implemented")
 }
 
-func (r *DeviceRepository) Delete(context.Context, uuid.UUID) error {
-	return errors.New("not implemented")
+func (r *DeviceRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var state device.State
+	err = tx.QueryRow(ctx, `
+		SELECT state
+		FROM devices
+		WHERE id = $1 AND deleted_at IS NULL
+		FOR UPDATE`, id,
+	).Scan(&state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return device.ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("select device for update: %w", err)
+	}
+	if state == device.StateInUse {
+		return device.ErrInUse
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE devices SET deleted_at = now() WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("soft delete device: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
 }
