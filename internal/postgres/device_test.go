@@ -36,6 +36,20 @@ func newTestRepository(t *testing.T) *DeviceRepository {
 	return NewDeviceRepository(pool)
 }
 
+func createTestDevice(t *testing.T, repo *DeviceRepository, state device.State) *device.Device {
+	t.Helper()
+	d, err := repo.Create(context.Background(), device.Device{
+		ID:    uuid.Must(uuid.NewV7()),
+		Name:  "iPhone",
+		Brand: "Apple",
+		State: state,
+	})
+	if err != nil {
+		t.Fatalf("Create() unexpected error: %v", err)
+	}
+	return d
+}
+
 // waitUntilBlockedBy waits until some session is waiting on a lock held by
 // blockerPID. It fails if done receives first, meaning the operation finished
 // without waiting for the lock.
@@ -117,25 +131,8 @@ func TestDeviceRepositoryGet(t *testing.T) {
 	repo := newTestRepository(t)
 	ctx := context.Background()
 
-	stored, err := repo.Create(ctx, device.Device{
-		ID:    uuid.Must(uuid.NewV7()),
-		Name:  "iPhone",
-		Brand: "Apple",
-		State: device.StateAvailable,
-	})
-	if err != nil {
-		t.Fatalf("Create() unexpected error: %v", err)
-	}
-
-	deleted, err := repo.Create(ctx, device.Device{
-		ID:    uuid.Must(uuid.NewV7()),
-		Name:  "Pixel",
-		Brand: "Google",
-		State: device.StateInactive,
-	})
-	if err != nil {
-		t.Fatalf("Create() unexpected error: %v", err)
-	}
+	stored := createTestDevice(t, repo, device.StateAvailable)
+	deleted := createTestDevice(t, repo, device.StateInactive)
 	if err := repo.Delete(ctx, deleted.ID); err != nil {
 		t.Fatalf("Delete() unexpected error: %v", err)
 	}
@@ -179,22 +176,8 @@ func TestDeviceRepositoryDelete(t *testing.T) {
 	repo := newTestRepository(t)
 	ctx := context.Background()
 
-	create := func(t *testing.T, state device.State) *device.Device {
-		t.Helper()
-		d, err := repo.Create(ctx, device.Device{
-			ID:    uuid.Must(uuid.NewV7()),
-			Name:  "iPhone",
-			Brand: "Apple",
-			State: state,
-		})
-		if err != nil {
-			t.Fatalf("Create() unexpected error: %v", err)
-		}
-		return d
-	}
-
 	t.Run("deletes available device", func(t *testing.T) {
-		d := create(t, device.StateAvailable)
+		d := createTestDevice(t, repo, device.StateAvailable)
 
 		if err := repo.Delete(ctx, d.ID); err != nil {
 			t.Fatalf("Delete() unexpected error: %v", err)
@@ -205,7 +188,7 @@ func TestDeviceRepositoryDelete(t *testing.T) {
 	})
 
 	t.Run("returns not found for already deleted device", func(t *testing.T) {
-		d := create(t, device.StateInactive)
+		d := createTestDevice(t, repo, device.StateInactive)
 
 		if err := repo.Delete(ctx, d.ID); err != nil {
 			t.Fatalf("first Delete() unexpected error: %v", err)
@@ -217,7 +200,7 @@ func TestDeviceRepositoryDelete(t *testing.T) {
 	})
 
 	t.Run("rejects in-use device", func(t *testing.T) {
-		d := create(t, device.StateInUse)
+		d := createTestDevice(t, repo, device.StateInUse)
 
 		if err := repo.Delete(ctx, d.ID); !errors.Is(err, device.ErrInUse) {
 			t.Fatalf("Delete() error = %v, want %v", err, device.ErrInUse)
@@ -234,7 +217,7 @@ func TestDeviceRepositoryDelete(t *testing.T) {
 	})
 
 	t.Run("waits for a concurrent state change", func(t *testing.T) {
-		d := create(t, device.StateAvailable)
+		d := createTestDevice(t, repo, device.StateAvailable)
 
 		// Another transaction locks the device and puts it in use, but has not committed yet.
 		other, err := repo.pool.Begin(ctx)
@@ -275,22 +258,8 @@ func TestDeviceRepositoryUpdate(t *testing.T) {
 	repo := newTestRepository(t)
 	ctx := context.Background()
 
-	create := func(t *testing.T, state device.State) *device.Device {
-		t.Helper()
-		d, err := repo.Create(ctx, device.Device{
-			ID:    uuid.Must(uuid.NewV7()),
-			Name:  "iPhone",
-			Brand: "Apple",
-			State: state,
-		})
-		if err != nil {
-			t.Fatalf("Create() unexpected error: %v", err)
-		}
-		return d
-	}
-
 	t.Run("saves changes and sets updated_at", func(t *testing.T) {
-		d := create(t, device.StateAvailable)
+		d := createTestDevice(t, repo, device.StateAvailable)
 
 		got, err := repo.Update(ctx, d.ID, func(dd *device.Device) error {
 			dd.Name = "Galaxy"
@@ -324,7 +293,7 @@ func TestDeviceRepositoryUpdate(t *testing.T) {
 	})
 
 	t.Run("does not save when fn returns an error", func(t *testing.T) {
-		d := create(t, device.StateInUse)
+		d := createTestDevice(t, repo, device.StateInUse)
 		errRejected := errors.New("rejected")
 
 		got, err := repo.Update(ctx, d.ID, func(x *device.Device) error {
@@ -362,7 +331,7 @@ func TestDeviceRepositoryUpdate(t *testing.T) {
 	})
 
 	t.Run("returns not found for deleted device", func(t *testing.T) {
-		d := create(t, device.StateAvailable)
+		d := createTestDevice(t, repo, device.StateAvailable)
 		if err := repo.Delete(ctx, d.ID); err != nil {
 			t.Fatalf("Delete() unexpected error: %v", err)
 		}
@@ -374,7 +343,7 @@ func TestDeviceRepositoryUpdate(t *testing.T) {
 	})
 
 	t.Run("waits for a concurrent state change", func(t *testing.T) {
-		d := create(t, device.StateAvailable)
+		d := createTestDevice(t, repo, device.StateAvailable)
 
 		// Another transaction puts the device in use, but has not committed yet.
 		other, err := repo.pool.Begin(ctx)
