@@ -36,6 +36,39 @@ func newTestRepository(t *testing.T) *DeviceRepository {
 	return NewDeviceRepository(pool)
 }
 
+// waitUntilBlockedBy waits until some session is waiting on a lock held by
+// blockerPID. It fails if done receives first, meaning the operation finished
+// without waiting for the lock.
+func waitUntilBlockedBy(t *testing.T, pool *pgxpool.Pool, blockerPID int, done <-chan error) {
+	t.Helper()
+	const query = `SELECT EXISTS (
+		SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))
+	)`
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			t.Fatalf("operation returned %v without waiting for the lock", err)
+		case <-deadline:
+			t.Fatal("no session became blocked by the other transaction")
+		default:
+		}
+
+		var blocked bool
+		err := pool.
+			QueryRow(context.Background(), query, blockerPID).
+			Scan(&blocked)
+		if err != nil {
+			t.Fatalf("check blocked sessions: %v", err)
+		}
+		if blocked {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestDeviceRepositoryCreate(t *testing.T) {
 	repo := newTestRepository(t)
 	ctx := context.Background()
@@ -103,12 +136,8 @@ func TestDeviceRepositoryGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() unexpected error: %v", err)
 	}
-	if _, err := repo.pool.Exec(
-		ctx,
-		"UPDATE devices SET deleted_at = now() WHERE id = $1",
-		deleted.ID,
-	); err != nil {
-		t.Fatalf("soft delete device: %v", err)
+	if err := repo.Delete(ctx, deleted.ID); err != nil {
+		t.Fatalf("Delete() unexpected error: %v", err)
 	}
 
 	t.Run("returns stored device", func(t *testing.T) {
@@ -142,6 +171,102 @@ func TestDeviceRepositoryGet(t *testing.T) {
 		}
 		if got != nil {
 			t.Fatalf("Get() = %s, want nil", got)
+		}
+	})
+}
+
+func TestDeviceRepositoryDelete(t *testing.T) {
+	repo := newTestRepository(t)
+	ctx := context.Background()
+
+	create := func(t *testing.T, state device.State) *device.Device {
+		t.Helper()
+		d, err := repo.Create(ctx, device.Device{
+			ID:    uuid.Must(uuid.NewV7()),
+			Name:  "iPhone",
+			Brand: "Apple",
+			State: state,
+		})
+		if err != nil {
+			t.Fatalf("Create() unexpected error: %v", err)
+		}
+		return d
+	}
+
+	t.Run("deletes available device", func(t *testing.T) {
+		d := create(t, device.StateAvailable)
+
+		if err := repo.Delete(ctx, d.ID); err != nil {
+			t.Fatalf("Delete() unexpected error: %v", err)
+		}
+		if _, err := repo.Get(ctx, d.ID); !errors.Is(err, device.ErrNotFound) {
+			t.Fatalf("Get() after delete error = %v, want %v", err, device.ErrNotFound)
+		}
+	})
+
+	t.Run("returns not found for already deleted device", func(t *testing.T) {
+		d := create(t, device.StateInactive)
+
+		if err := repo.Delete(ctx, d.ID); err != nil {
+			t.Fatalf("first Delete() unexpected error: %v", err)
+		}
+
+		if err := repo.Delete(ctx, d.ID); !errors.Is(err, device.ErrNotFound) {
+			t.Fatalf("second Delete() error = %v, want %v", err, device.ErrNotFound)
+		}
+	})
+
+	t.Run("rejects in-use device", func(t *testing.T) {
+		d := create(t, device.StateInUse)
+
+		if err := repo.Delete(ctx, d.ID); !errors.Is(err, device.ErrInUse) {
+			t.Fatalf("Delete() error = %v, want %v", err, device.ErrInUse)
+		}
+		if _, err := repo.Get(ctx, d.ID); err != nil {
+			t.Fatalf("Get() after rejected delete error = %v, want device to still exist", err)
+		}
+	})
+
+	t.Run("returns not found for unknown id", func(t *testing.T) {
+		if err := repo.Delete(ctx, uuid.Must(uuid.NewV7())); !errors.Is(err, device.ErrNotFound) {
+			t.Fatalf("Delete() error = %v, want %v", err, device.ErrNotFound)
+		}
+	})
+
+	t.Run("waits for a concurrent state change", func(t *testing.T) {
+		d := create(t, device.StateAvailable)
+
+		// Another transaction locks the device and puts it in use, but has not committed yet.
+		other, err := repo.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin other transaction: %v", err)
+		}
+		defer other.Rollback(ctx)
+
+		var otherPID int
+		if err := other.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&otherPID); err != nil {
+			t.Fatalf("get other transaction pid: %v", err)
+		}
+		if _, err := other.Exec(ctx, `UPDATE devices SET state = 'in-use' WHERE id = $1`, d.ID); err != nil {
+			t.Fatalf("update in other transaction: %v", err)
+		}
+
+		done := make(chan error, 1)
+		go func() { done <- repo.Delete(ctx, d.ID) }()
+
+		waitUntilBlockedBy(t, repo.pool, otherPID, done)
+
+		if err := other.Commit(ctx); err != nil {
+			t.Fatalf("commit other transaction: %v", err)
+		}
+
+		select {
+		case err := <-done:
+			if !errors.Is(err, device.ErrInUse) {
+				t.Fatalf("Delete() error = %v, want %v", err, device.ErrInUse)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Delete() did not return after the lock was released")
 		}
 	})
 }

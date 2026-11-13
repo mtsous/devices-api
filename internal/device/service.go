@@ -114,15 +114,6 @@ func (s *Service) Update(
 }
 
 func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
-	device, err := s.repo.Get(ctx, id)
-	if err != nil {
-		return fmt.Errorf("delete device %s: %w", id, err)
-	}
-
-	if device.State == StateInUse {
-		return fmt.Errorf("delete device %s: %w", id, ErrInUse)
-	}
-
 	if err := s.repo.Delete(ctx, id); err != nil {
 		return fmt.Errorf("delete device %s: %w", id, err)
 	}
