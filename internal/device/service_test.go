@@ -1,7 +1,6 @@
 package device
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -13,9 +12,83 @@ import (
 	"github.com/google/uuid"
 )
 
-var errFake = errors.New("fake repository error")
+// fakeRepository is an in-memory Repository for service tests. It only
+// stores and returns devices; repository rules such as timestamps, soft
+// delete, filtering and ordering are covered by the Postgres repository tests.
+type fakeRepository struct {
+	devices map[uuid.UUID]Device
 
-var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	listResult []*Device
+
+	createErr error
+	getErr    error
+	listErr   error
+	deleteErr error
+
+	// Recorded calls.
+	createCalled    bool
+	listCalled      bool
+	lastFilter      Filter
+	lastPageRequest PageRequest
+	deletedIDs      []uuid.UUID
+}
+
+func newFakeRepository() *fakeRepository {
+	return &fakeRepository{devices: map[uuid.UUID]Device{}}
+}
+
+func (f *fakeRepository) Create(_ context.Context, device Device) (*Device, error) {
+	f.createCalled = true
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	return &device, nil
+}
+
+func (f *fakeRepository) Get(_ context.Context, id uuid.UUID) (*Device, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	device, ok := f.devices[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &device, nil
+}
+
+func (f *fakeRepository) List(_ context.Context, filter Filter, page PageRequest) ([]*Device, error) {
+	f.listCalled = true
+	f.lastFilter = filter
+	f.lastPageRequest = page
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	if len(f.listResult) == 0 {
+		return nil, nil // result query with no rows
+	}
+	return f.listResult[:min(page.Size, len(f.listResult))], nil
+}
+
+func (f *fakeRepository) Update(context.Context, Device) error {
+	return errors.New("not implemented")
+}
+
+func (f *fakeRepository) Delete(_ context.Context, id uuid.UUID) error {
+	f.deletedIDs = append(f.deletedIDs, id)
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	if _, ok := f.devices[id]; !ok {
+		return ErrNotFound
+	}
+	delete(f.devices, id)
+	return nil
+}
+
+var (
+	errFakeRepo   = errors.New("fake repository error")
+	discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+)
 
 func newTestService(t *testing.T, repo Repository) *Service {
 	t.Helper()
@@ -24,6 +97,33 @@ func newTestService(t *testing.T, repo Repository) *Service {
 		t.Fatalf("NewService() unexpected error: %v", err)
 	}
 	return svc
+}
+
+func newTestDevice(state State) Device {
+	return Device{
+		ID:        uuid.Must(uuid.NewV7()),
+		Name:      "iPhone",
+		Brand:     "Apple",
+		State:     state,
+		CreatedAt: time.Now().UTC(),
+	}
+}
+
+func newTestDevices(n int) []*Device {
+	devices := make([]*Device, n)
+	for i := range devices {
+		d := newTestDevice(StateAvailable)
+		devices[i] = &d
+	}
+	return devices
+}
+
+func ids(devices []*Device) []uuid.UUID {
+	out := make([]uuid.UUID, len(devices))
+	for i, d := range devices {
+		out[i] = d.ID
+	}
+	return out
 }
 
 func assertDeviceEqual(t *testing.T, got, want Device) {
@@ -80,91 +180,6 @@ func TestNewService(t *testing.T) {
 	}
 }
 
-type fakeRepository struct {
-	devices map[uuid.UUID]Device
-
-	createErr error
-	getErr    error
-	listErr   error
-	deleteErr error
-
-	lastPageRequest PageRequest
-	deletedIDs      []uuid.UUID
-}
-
-func newFakeRepository() *fakeRepository {
-	return &fakeRepository{devices: map[uuid.UUID]Device{}}
-}
-
-func (f *fakeRepository) Create(_ context.Context, device Device) (*Device, error) {
-	if f.createErr != nil {
-		return nil, f.createErr
-	}
-	f.devices[device.ID] = device
-	return &device, nil
-}
-
-func (f *fakeRepository) Get(_ context.Context, id uuid.UUID) (*Device, error) {
-	if f.getErr != nil {
-		return nil, f.getErr
-	}
-	device, ok := f.devices[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	return &device, nil
-}
-
-func (f *fakeRepository) List(_ context.Context, filter Filter, page PageRequest) ([]*Device, error) {
-	f.lastPageRequest = page
-
-	if f.listErr != nil {
-		return nil, f.listErr
-	}
-
-	matches := make([]Device, 0, len(f.devices))
-	for _, d := range f.devices {
-		if filter.Brand != "" && d.Brand != filter.Brand {
-			continue
-		}
-		if filter.State != "" && d.State != filter.State {
-			continue
-		}
-		if page.Cursor != uuid.Nil && bytes.Compare(d.ID[:], page.Cursor[:]) <= 0 {
-			continue
-		}
-		matches = append(matches, d)
-	}
-	slices.SortFunc(matches, func(a, b Device) int {
-		return bytes.Compare(a.ID[:], b.ID[:])
-	})
-
-	var result []*Device
-	for i := range matches {
-		if len(result) == page.Size {
-			break
-		}
-		result = append(result, &matches[i])
-	}
-	return result, nil
-}
-
-func (f *fakeRepository) Update(context.Context, Device) error {
-	return errors.New("not implemented")
-}
-
-func (f *fakeRepository) Delete(_ context.Context, id uuid.UUID) error {
-	f.deletedIDs = append(f.deletedIDs, id)
-	if f.deleteErr != nil {
-		return f.deleteErr
-	}
-	if _, ok := f.devices[id]; !ok {
-		return ErrNotFound
-	}
-	delete(f.devices, id)
-	return nil
-}
-
 func TestServiceCreate(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -206,8 +221,8 @@ func TestServiceCreate(t *testing.T) {
 		{
 			name:      "returns repository error",
 			input:     Device{Name: "iPhone", Brand: "Apple"},
-			createErr: errFake,
-			wantErr:   errFake,
+			createErr: errFakeRepo,
+			wantErr:   errFakeRepo,
 		},
 	}
 
@@ -224,57 +239,42 @@ func TestServiceCreate(t *testing.T) {
 					t.Fatalf("Create() error = %v, want %v", err, tc.wantErr)
 				}
 				if got != nil {
-					t.Fatalf("Create() = %+v, want nil on error", got)
+					t.Fatalf("Create() = %s, want nil on error", got)
 				}
-				if len(repo.devices) != 0 {
-					t.Fatalf("repository has %d devices, want 0", len(repo.devices))
+				if tc.createErr == nil && repo.createCalled {
+					t.Fatal("repository Create() called, validation should fail first")
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("Create() unexpected error: %v", err)
 			}
-
 			if got == nil {
 				t.Fatal("Create() returned a nil device")
 			}
+
 			if got.ID.Version() != 7 {
 				t.Fatalf("ID version = %d, want 7", got.ID.Version())
 			}
-			if got.Name != tc.want.Name || got.Brand != tc.want.Brand || got.State != tc.want.State {
-				t.Fatalf("Create() = %+v, want name=%q brand=%q state=%q",
-					got, tc.want.Name, tc.want.Brand, tc.want.State)
-			}
-
-			stored, ok := repo.devices[got.ID]
-			if !ok {
-				t.Fatalf("device %s was not stored", got.ID)
-			}
-			assertDeviceEqual(t, stored, *got)
+			want := tc.want
+			want.ID = got.ID
+			assertDeviceEqual(t, *got, want)
 		})
 	}
 }
 
 func TestServiceGet(t *testing.T) {
-	existing := Device{
-		ID:        uuid.Must(uuid.NewV7()),
-		Name:      "iPhone",
-		Brand:     "Apple",
-		State:     StateAvailable,
-		CreatedAt: time.Now().UTC(),
-	}
+	existing := newTestDevice(StateAvailable)
 
 	tests := []struct {
 		name    string
 		id      uuid.UUID
 		getErr  error
-		want    Device
 		wantErr error
 	}{
 		{
 			name: "returns existing device",
 			id:   existing.ID,
-			want: existing,
 		},
 		{
 			name:    "returns not found for unknown id",
@@ -284,8 +284,8 @@ func TestServiceGet(t *testing.T) {
 		{
 			name:    "returns repository error",
 			id:      existing.ID,
-			getErr:  errFake,
-			wantErr: errFake,
+			getErr:  errFakeRepo,
+			wantErr: errFakeRepo,
 		},
 	}
 
@@ -303,134 +303,84 @@ func TestServiceGet(t *testing.T) {
 					t.Fatalf("Get() error = %v, want %v", err, tc.wantErr)
 				}
 				if got != nil {
-					t.Fatalf("Get() = %+v, want nil on error", got)
+					t.Fatalf("Get() = %s, want nil on error", got)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("Get() unexpected error: %v", err)
 			}
-
 			if got == nil {
 				t.Fatal("Get() returned a nil device")
 			}
-			assertDeviceEqual(t, *got, tc.want)
+			assertDeviceEqual(t, *got, existing)
 		})
 	}
 }
 
-func newTestDevices(t *testing.T, n int, brand string, state State) []Device {
-	t.Helper()
-	devices := make([]Device, n)
-	for i := range devices {
-		devices[i] = Device{
-			ID:        uuid.Must(uuid.NewV7()),
-			Name:      "device",
-			Brand:     brand,
-			State:     state,
-			CreatedAt: time.Now().UTC(),
-		}
-	}
-	return devices
-}
-
-func ids(devices []*Device) []uuid.UUID {
-	out := make([]uuid.UUID, len(devices))
-	for i, d := range devices {
-		out[i] = d.ID
-	}
-	return out
-}
-
-func valueIDs(devices []Device) []uuid.UUID {
-	out := make([]uuid.UUID, len(devices))
-	for i, d := range devices {
-		out[i] = d.ID
-	}
-	return out
-}
-
 func TestServiceList(t *testing.T) {
-	apple := newTestDevices(t, 3, "Apple", StateAvailable)
-	samsung := newTestDevices(t, 2, "Samsung", StateInUse)
-	all := append(append([]Device{}, apple...), samsung...)
+	cursor := uuid.Must(uuid.NewV7())
 
 	tests := []struct {
-		name       string
-		filter     Filter
-		page       PageRequest
-		listErr    error
-		wantIDs    []uuid.UUID
-		wantCursor uuid.UUID
-		wantSize   int
-		wantErr    error
+		name        string
+		filter      Filter
+		page        PageRequest
+		deviceCount int
+		listErr     error
+
+		wantFilter      Filter
+		wantRequest     PageRequest
+		wantDeviceCount int
+		wantCursor      bool // should be ID of the last returned device
+		wantErr         error
 	}{
 		{
-			name:     "returns all devices when no filter",
-			wantIDs:  valueIDs(all),
-			wantSize: DefaultPageLimit + 1,
+			name:            "uses default size when not set",
+			deviceCount:     5,
+			wantRequest:     PageRequest{Size: DefaultPageLimit + 1},
+			wantDeviceCount: 5,
 		},
 		{
-			name:     "filters by brand",
-			filter:   Filter{Brand: "Apple"},
-			wantIDs:  valueIDs(apple),
-			wantSize: DefaultPageLimit + 1,
+			name:        "uses default size when negative",
+			page:        PageRequest{Size: -1},
+			wantRequest: PageRequest{Size: DefaultPageLimit + 1},
 		},
 		{
-			name:     "trims brand filter",
-			filter:   Filter{Brand: "  Samsung "},
-			wantIDs:  valueIDs(samsung),
-			wantSize: DefaultPageLimit + 1,
+			name:        "caps size at max",
+			page:        PageRequest{Size: MaxPageLimit + 50},
+			wantRequest: PageRequest{Size: MaxPageLimit + 1},
 		},
 		{
-			name:     "filters by state",
-			filter:   Filter{State: StateInUse},
-			wantIDs:  valueIDs(samsung),
-			wantSize: DefaultPageLimit + 1,
+			name:        "passes cursor to repository",
+			page:        PageRequest{Size: 2, Cursor: cursor},
+			wantRequest: PageRequest{Size: 3, Cursor: cursor},
 		},
 		{
-			name:       "returns cursor when more pages exist",
-			page:       PageRequest{Size: 2},
-			wantIDs:    valueIDs(all[:2]),
-			wantCursor: all[1].ID,
-			wantSize:   3,
+			name:            "returns cursor when more pages exist",
+			page:            PageRequest{Size: 2},
+			deviceCount:     3,
+			wantRequest:     PageRequest{Size: 3},
+			wantDeviceCount: 2,
+			wantCursor:      true,
 		},
 		{
-			name:       "continues from cursor",
-			page:       PageRequest{Size: 2, Cursor: all[1].ID},
-			wantIDs:    valueIDs(all[2:4]),
-			wantCursor: all[3].ID,
-			wantSize:   3,
+			name:            "returns no cursor on exact page size",
+			page:            PageRequest{Size: 2},
+			deviceCount:     2,
+			wantRequest:     PageRequest{Size: 3},
+			wantDeviceCount: 2,
 		},
 		{
-			name:     "last page has no cursor",
-			page:     PageRequest{Size: 2, Cursor: all[3].ID},
-			wantIDs:  valueIDs(all[4:]),
-			wantSize: 3,
+			name:        "trims brand filter",
+			filter:      Filter{Brand: "  Samsung "},
+			wantFilter:  Filter{Brand: "Samsung"},
+			wantRequest: PageRequest{Size: DefaultPageLimit + 1},
 		},
 		{
-			name:     "exact page size has no cursor",
-			page:     PageRequest{Size: len(all)},
-			wantIDs:  valueIDs(all),
-			wantSize: len(all) + 1,
-		},
-		{
-			name:     "caps size at max",
-			page:     PageRequest{Size: MaxPageLimit + 50},
-			wantIDs:  valueIDs(all),
-			wantSize: MaxPageLimit + 1,
-		},
-		{
-			name:     "defaults negative size",
-			page:     PageRequest{Size: -1},
-			wantIDs:  valueIDs(all),
-			wantSize: DefaultPageLimit + 1,
-		},
-		{
-			name:     "returns empty slice when nothing matches",
-			filter:   Filter{Brand: "Nokia"},
-			wantIDs:  []uuid.UUID{},
-			wantSize: DefaultPageLimit + 1,
+			name:        "passes state filter",
+			filter:      Filter{State: StateInUse},
+			wantFilter:  Filter{State: StateInUse},
+			wantRequest: PageRequest{Size: DefaultPageLimit + 1},
 		},
 		{
 			name:    "rejects brand and state together",
@@ -444,17 +394,15 @@ func TestServiceList(t *testing.T) {
 		},
 		{
 			name:    "returns repository error",
-			listErr: errFake,
-			wantErr: errFake,
+			listErr: errFakeRepo,
+			wantErr: errFakeRepo,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := newFakeRepository()
-			for _, d := range all {
-				repo.devices[d.ID] = d
-			}
+			repo.listResult = newTestDevices(tc.deviceCount)
 			repo.listErr = tc.listErr
 
 			svc := newTestService(t, repo)
@@ -467,45 +415,48 @@ func TestServiceList(t *testing.T) {
 				if got != nil {
 					t.Fatalf("List() = %+v, want nil on error", got)
 				}
+				if tc.listErr == nil && repo.listCalled {
+					t.Fatal("repository List called, want validation to fail first")
+				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("List() unexpected error: %v", err)
 			}
-
 			if got == nil {
 				t.Fatal("List() returned a nil page")
 			}
+
+			if repo.lastFilter != tc.wantFilter {
+				t.Fatalf("repository filter = %+v, want %+v", repo.lastFilter, tc.wantFilter)
+			}
+			if repo.lastPageRequest != tc.wantRequest {
+				t.Fatalf("repository page request = %+v, want %+v", repo.lastPageRequest, tc.wantRequest)
+			}
+
 			if got.Devices == nil {
 				t.Fatal("List() Devices = nil, want empty slice")
 			}
-			if gotIDs := ids(got.Devices); !slices.Equal(gotIDs, tc.wantIDs) {
-				t.Fatalf("List() ids = %v, want %v", gotIDs, tc.wantIDs)
+			wantIDs := ids(repo.listResult[:tc.wantDeviceCount])
+			if gotIDs := ids(got.Devices); !slices.Equal(gotIDs, wantIDs) {
+				t.Fatalf("List() ids = %v, want %v", gotIDs, wantIDs)
 			}
-			if got.Cursor != tc.wantCursor {
-				t.Fatalf("List() cursor = %v, want %v", got.Cursor, tc.wantCursor)
+
+			wantCursor := uuid.Nil
+			if tc.wantCursor {
+				wantCursor = wantIDs[len(wantIDs)-1]
 			}
-			if got.HasNext() != (tc.wantCursor != uuid.Nil) {
-				t.Fatalf("HasNext() = %v, want %v", got.HasNext(), tc.wantCursor != uuid.Nil)
+			if got.Cursor != wantCursor {
+				t.Fatalf("List() cursor = %v, want %v", got.Cursor, wantCursor)
 			}
-			if repo.lastPageRequest.Size != tc.wantSize {
-				t.Fatalf("repository page size = %d, want %d", repo.lastPageRequest.Size, tc.wantSize)
+			if got.HasNext() != tc.wantCursor {
+				t.Fatalf("HasNext() = %v, want %v", got.HasNext(), tc.wantCursor)
 			}
 		})
 	}
 }
 
 func TestServiceDelete(t *testing.T) {
-	newDevice := func(state State) Device {
-		return Device{
-			ID:        uuid.Must(uuid.NewV7()),
-			Name:      "iPhone",
-			Brand:     "Apple",
-			State:     state,
-			CreatedAt: time.Now().UTC(),
-		}
-	}
-
 	tests := []struct {
 		name           string
 		device         Device
@@ -517,36 +468,36 @@ func TestServiceDelete(t *testing.T) {
 	}{
 		{
 			name:           "deletes available device",
-			device:         newDevice(StateAvailable),
+			device:         newTestDevice(StateAvailable),
 			wantDeleteCall: true,
 		},
 		{
 			name:           "deletes inactive device",
-			device:         newDevice(StateInactive),
+			device:         newTestDevice(StateInactive),
 			wantDeleteCall: true,
 		},
 		{
 			name:    "rejects in-use device",
-			device:  newDevice(StateInUse),
+			device:  newTestDevice(StateInUse),
 			wantErr: ErrInUse,
 		},
 		{
 			name:      "returns not found for unknown id",
-			device:    newDevice(StateAvailable),
+			device:    newTestDevice(StateAvailable),
 			unknownID: true,
 			wantErr:   ErrNotFound,
 		},
 		{
 			name:    "returns repository get error",
-			device:  newDevice(StateAvailable),
-			getErr:  errFake,
-			wantErr: errFake,
+			device:  newTestDevice(StateAvailable),
+			getErr:  errFakeRepo,
+			wantErr: errFakeRepo,
 		},
 		{
 			name:           "returns repository delete error",
-			device:         newDevice(StateAvailable),
-			deleteErr:      errFake,
-			wantErr:        errFake,
+			device:         newTestDevice(StateAvailable),
+			deleteErr:      errFakeRepo,
+			wantErr:        errFakeRepo,
 			wantDeleteCall: true,
 		},
 	}
