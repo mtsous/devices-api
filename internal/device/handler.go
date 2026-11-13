@@ -18,6 +18,7 @@ var errTrailingData = errors.New("request body must contain a single JSON object
 type deviceService interface {
 	Create(ctx context.Context, device Device) (*Device, error)
 	Get(ctx context.Context, id uuid.UUID) (*Device, error)
+	Update(ctx context.Context, id uuid.UUID, params UpdateParams) (*Device, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 }
 
@@ -36,6 +37,7 @@ func NewHandler(
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /devices", h.create)
 	mux.HandleFunc("GET /devices/{id}", h.get)
+	mux.HandleFunc("PATCH /devices/{id}", h.update)
 	mux.HandleFunc("DELETE /devices/{id}", h.delete)
 }
 
@@ -43,6 +45,12 @@ type createDeviceRequest struct {
 	Name  string `json:"name"`
 	Brand string `json:"brand"`
 	State State  `json:"state"`
+}
+
+type updateDeviceRequest struct {
+	Name  *string `json:"name"`
+	Brand *string `json:"brand"`
+	State *State  `json:"state"`
 }
 
 type deviceResponse struct {
@@ -104,6 +112,32 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, r, http.StatusOK, toDeviceResponse(device))
+}
+
+func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		h.writeError(w, r, http.StatusBadRequest, "invalid device id")
+		return
+	}
+
+	var req updateDeviceRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		h.writeError(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	updated, err := h.service.Update(r.Context(), id, UpdateParams{
+		Name:  req.Name,
+		Brand: req.Brand,
+		State: req.State,
+	})
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+
+	h.writeJSON(w, r, http.StatusOK, toDeviceResponse(updated))
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {

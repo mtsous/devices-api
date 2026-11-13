@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -105,12 +106,18 @@ func (s *Service) List(
 	return result, nil
 }
 
+type UpdateParams struct {
+	Name  *string
+	Brand *string
+	State *State
+}
+
 func (s *Service) Update(
 	ctx context.Context,
 	id uuid.UUID,
-	device Device,
+	params UpdateParams,
 ) (*Device, error) {
-	panic("not implemented")
+	return nil, errors.New("not implemented")
 }
 
 func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {

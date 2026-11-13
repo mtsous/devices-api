@@ -51,6 +51,10 @@ func (f *fakeService) Get(_ context.Context, id uuid.UUID) (*Device, error) {
 	return f.device, nil
 }
 
+func (f *fakeService) Update(context.Context, uuid.UUID, UpdateParams) (*Device, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (f *fakeService) Delete(_ context.Context, id uuid.UUID) error {
 	f.deleteCalled = true
 	f.lastDeleteID = id
