@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +19,7 @@ var errTrailingData = errors.New("request body must contain a single JSON object
 type deviceService interface {
 	Create(ctx context.Context, device Device) (*Device, error)
 	Get(ctx context.Context, id uuid.UUID) (*Device, error)
+	List(ctx context.Context, filter Filter, page PageRequest) (*Page, error)
 	Update(ctx context.Context, id uuid.UUID, params UpdateParams) (*Device, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 }
@@ -36,6 +38,7 @@ func NewHandler(
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /devices", h.create)
+	mux.HandleFunc("GET /devices", h.list)
 	mux.HandleFunc("GET /devices/{id}", h.get)
 	mux.HandleFunc("PATCH /devices/{id}", h.update)
 	mux.HandleFunc("DELETE /devices/{id}", h.delete)
@@ -60,6 +63,11 @@ type deviceResponse struct {
 	State     State      `json:"state"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+type listDevicesResponse struct {
+	Devices    []deviceResponse `json:"devices"`
+	NextCursor string           `json:"next_cursor,omitempty"`
 }
 
 type errorResponse struct {
@@ -112,6 +120,49 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, r, http.StatusOK, toDeviceResponse(device))
+}
+
+func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+
+	page := PageRequest{}
+	if raw := query.Get("cursor"); raw != "" {
+		cursor, err := uuid.Parse(raw)
+		if err != nil {
+			h.writeError(w, r, http.StatusBadRequest, "invalid cursor")
+			return
+		}
+		page.Cursor = cursor
+	}
+	if raw := query.Get("limit"); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil {
+			h.writeError(w, r, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		page.Size = limit
+	}
+
+	filter := Filter{
+		Brand: query.Get("brand"),
+		State: State(query.Get("state")),
+	}
+
+	result, err := h.service.List(r.Context(), filter, page)
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+
+	resp := listDevicesResponse{Devices: make([]deviceResponse, len(result.Devices))}
+	for i, d := range result.Devices {
+		resp.Devices[i] = toDeviceResponse(d)
+	}
+	if result.HasNext() {
+		resp.NextCursor = result.Cursor.String()
+	}
+
+	h.writeJSON(w, r, http.StatusOK, resp)
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
