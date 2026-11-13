@@ -18,6 +18,7 @@ var errTrailingData = errors.New("request body must contain a single JSON object
 type deviceService interface {
 	Create(ctx context.Context, device Device) (*Device, error)
 	Get(ctx context.Context, id uuid.UUID) (*Device, error)
+	Delete(ctx context.Context, id uuid.UUID) error
 }
 
 type Handler struct {
@@ -35,6 +36,7 @@ func NewHandler(
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /devices", h.create)
 	mux.HandleFunc("GET /devices/{id}", h.get)
+	mux.HandleFunc("DELETE /devices/{id}", h.delete)
 }
 
 type createDeviceRequest struct {
@@ -104,6 +106,21 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, r, http.StatusOK, toDeviceResponse(device))
 }
 
+func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		h.writeError(w, r, http.StatusBadRequest, "invalid device id")
+		return
+	}
+
+	if err := h.service.Delete(r.Context(), id); err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	decoder := json.NewDecoder(r.Body)
@@ -126,6 +143,8 @@ func (h *Handler) writeServiceError(w http.ResponseWriter, r *http.Request, err 
 		h.writeError(w, r, http.StatusBadRequest, err.Error())
 	case errors.Is(err, ErrNotFound):
 		h.writeError(w, r, http.StatusNotFound, "device not found")
+	case errors.Is(err, ErrInUse):
+		h.writeError(w, r, http.StatusConflict, "device is in use")
 	default:
 		h.logger.ErrorContext(r.Context(), "device request failed", "error", err)
 		h.writeError(w, r, http.StatusInternalServerError, "internal server error")

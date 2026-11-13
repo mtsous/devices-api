@@ -26,6 +26,11 @@ type fakeService struct {
 
 	getCalled bool
 	lastGetID uuid.UUID
+
+	deleteErr error
+
+	deleteCalled bool
+	lastDeleteID uuid.UUID
 }
 
 func (f *fakeService) Create(_ context.Context, device Device) (*Device, error) {
@@ -44,6 +49,12 @@ func (f *fakeService) Get(_ context.Context, id uuid.UUID) (*Device, error) {
 		return nil, f.getErr
 	}
 	return f.device, nil
+}
+
+func (f *fakeService) Delete(_ context.Context, id uuid.UUID) error {
+	f.deleteCalled = true
+	f.lastDeleteID = id
+	return f.deleteErr
 }
 
 func newTestMux(svc deviceService) *http.ServeMux {
@@ -298,6 +309,91 @@ func TestHandlerGet(t *testing.T) {
 				if got[k] != v {
 					t.Fatalf("response[%q] = %v, want %v", k, got[k], v)
 				}
+			}
+		})
+	}
+}
+
+func TestHandlerDelete(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+
+	tests := []struct {
+		name      string
+		id        string
+		deleteErr error
+
+		wantStatus int
+		wantCalled bool
+		wantError  string
+	}{
+		{
+			name:       "deletes device",
+			id:         id.String(),
+			wantStatus: http.StatusNoContent,
+			wantCalled: true,
+		},
+		{
+			name:       "rejects malformed id",
+			id:         "not-a-uuid",
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid device id",
+		},
+		{
+			name:       "maps not found to 404",
+			id:         id.String(),
+			deleteErr:  fmt.Errorf("delete device %s: %w", id, ErrNotFound),
+			wantStatus: http.StatusNotFound,
+			wantCalled: true,
+			wantError:  "device not found",
+		},
+		{
+			name:       "maps in use to 409",
+			id:         id.String(),
+			deleteErr:  fmt.Errorf("delete device %s: %w", id, ErrInUse),
+			wantStatus: http.StatusConflict,
+			wantCalled: true,
+			wantError:  "device is in use",
+		},
+		{
+			name:       "hides unexpected errors",
+			id:         id.String(),
+			deleteErr:  errors.New("connection refused"),
+			wantStatus: http.StatusInternalServerError,
+			wantCalled: true,
+			wantError:  "internal server error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeService{deleteErr: tc.deleteErr}
+			req := httptest.NewRequest(http.MethodDelete, "/devices/"+tc.id, nil)
+			rec := httptest.NewRecorder()
+
+			newTestMux(svc).ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body)
+			}
+			if svc.deleteCalled != tc.wantCalled {
+				t.Fatalf("service Delete called = %v, want %v", svc.deleteCalled, tc.wantCalled)
+			}
+			if tc.wantCalled && svc.lastDeleteID != id {
+				t.Fatalf("service Delete id = %s, want %s", svc.lastDeleteID, id)
+			}
+
+			if tc.wantError == "" {
+				if rec.Body.Len() != 0 {
+					t.Fatalf("body = %q, want empty", rec.Body)
+				}
+				return
+			}
+			var body errorResponse
+			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+				t.Fatalf("decode error body: %v", err)
+			}
+			if body.Error != tc.wantError {
+				t.Fatalf("error = %q, want %q", body.Error, tc.wantError)
 			}
 		})
 	}
