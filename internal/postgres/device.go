@@ -78,8 +78,67 @@ func (r *DeviceRepository) List(context.Context, device.Filter, device.PageReque
 	return nil, errors.New("not implemented")
 }
 
-func (r *DeviceRepository) Update(context.Context, uuid.UUID, func(d *device.Device) error) (*device.Device, error) {
-	return nil, errors.New("not implemented")
+func (r *DeviceRepository) Update(
+	ctx context.Context,
+	id uuid.UUID,
+	fn func(d *device.Device) error,
+) (*device.Device, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var d device.Device
+	err = tx.QueryRow(ctx, `
+		SELECT id, name, brand, state, created_at, updated_at, deleted_at
+		FROM devices
+		WHERE id = $1 AND deleted_at IS NULL
+		FOR UPDATE`, id,
+	).Scan(
+		&d.ID,
+		&d.Name,
+		&d.Brand,
+		&d.State,
+		&d.CreatedAt,
+		&d.UpdatedAt,
+		&d.DeletedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, device.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("select device for update: %w", err)
+	}
+
+	if err := fn(&d); err != nil {
+		return nil, err
+	}
+
+	var updated device.Device
+	err = tx.QueryRow(ctx, `
+		UPDATE devices
+		SET name = $2, brand = $3, state = $4, updated_at = now()
+		WHERE id = $1
+		RETURNING id, name, brand, state, created_at, updated_at, deleted_at`,
+		id, d.Name, d.Brand, d.State,
+	).Scan(
+		&updated.ID,
+		&updated.Name,
+		&updated.Brand,
+		&updated.State,
+		&updated.CreatedAt,
+		&updated.UpdatedAt,
+		&updated.DeletedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update device: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+	return &updated, nil
 }
 
 func (r *DeviceRepository) Delete(ctx context.Context, id uuid.UUID) error {
