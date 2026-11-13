@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -36,7 +35,7 @@ func assertDeviceEqual(t *testing.T, got, want Device) {
 		!got.CreatedAt.Equal(want.CreatedAt) ||
 		!equalTimePtr(got.UpdatedAt, want.UpdatedAt) ||
 		!equalTimePtr(got.DeletedAt, want.DeletedAt) {
-		t.Fatalf("device = %s, want %s", formatDevice(got), formatDevice(want))
+		t.Fatalf("device = %s, want %s", got, want)
 	}
 }
 
@@ -45,17 +44,6 @@ func equalTimePtr(a, b *time.Time) bool {
 		return a == b
 	}
 	return a.Equal(*b)
-}
-
-func formatDevice(d Device) string {
-	formatTimePtr := func(t *time.Time) string {
-		if t == nil {
-			return "<nil>"
-		}
-		return t.String()
-	}
-	return fmt.Sprintf("{ID:%s Name:%q Brand:%q State:%q CreatedAt:%s UpdatedAt:%s DeletedAt:%s}",
-		d.ID, d.Name, d.Brand, d.State, d.CreatedAt, formatTimePtr(d.UpdatedAt), formatTimePtr(d.DeletedAt))
 }
 
 func TestNewService(t *testing.T) {
