@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,13 @@ type fakeService struct {
 
 	getCalled bool
 	lastGetID uuid.UUID
+
+	page    *Page
+	listErr error
+
+	listCalled bool
+	lastFilter Filter
+	lastPage   PageRequest
 
 	updated   *Device
 	updateErr error
@@ -56,6 +64,16 @@ func (f *fakeService) Get(_ context.Context, id uuid.UUID) (*Device, error) {
 		return nil, f.getErr
 	}
 	return f.device, nil
+}
+
+func (f *fakeService) List(_ context.Context, filter Filter, page PageRequest) (*Page, error) {
+	f.listCalled = true
+	f.lastFilter = filter
+	f.lastPage = page
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.page, nil
 }
 
 func (f *fakeService) Update(_ context.Context, id uuid.UUID, params UpdateParams) (*Device, error) {
@@ -604,6 +622,184 @@ func TestHandlerUpdate(t *testing.T) {
 				if got[k] != v {
 					t.Fatalf("response[%q] = %v, want %v", k, got[k], v)
 				}
+			}
+		})
+	}
+}
+
+func TestHandlerList(t *testing.T) {
+	first := &Device{
+		ID:        uuid.Must(uuid.NewV7()),
+		Name:      "iPhone",
+		Brand:     "Apple",
+		State:     StateAvailable,
+		CreatedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+	}
+	second := &Device{
+		ID:        uuid.Must(uuid.NewV7()),
+		Name:      "Pixel",
+		Brand:     "Google",
+		State:     StateInUse,
+		CreatedAt: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC),
+	}
+	cursor := uuid.Must(uuid.NewV7())
+
+	tests := []struct {
+		name    string
+		query   string
+		page    *Page
+		listErr error
+
+		wantStatus     int
+		wantFilter     Filter
+		wantPage       PageRequest
+		wantCalled     bool
+		wantIDs        []string
+		wantNextCursor string // empty means the field must be absent
+		wantError      string
+	}{
+		{
+			name:       "lists devices without filters",
+			page:       &Page{Devices: []*Device{first, second}},
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+			wantIDs:    []string{first.ID.String(), second.ID.String()},
+		},
+		{
+			name:       "passes brand filter",
+			query:      "?brand=Apple",
+			page:       &Page{Devices: []*Device{first}},
+			wantStatus: http.StatusOK,
+			wantFilter: Filter{Brand: "Apple"},
+			wantCalled: true,
+			wantIDs:    []string{first.ID.String()},
+		},
+		{
+			name:       "passes state filter",
+			query:      "?state=in-use",
+			page:       &Page{Devices: []*Device{second}},
+			wantStatus: http.StatusOK,
+			wantFilter: Filter{State: StateInUse},
+			wantCalled: true,
+			wantIDs:    []string{second.ID.String()},
+		},
+		{
+			name:           "passes cursor and limit and returns next cursor",
+			query:          "?cursor=" + cursor.String() + "&limit=1",
+			page:           &Page{Devices: []*Device{first}, Cursor: first.ID},
+			wantStatus:     http.StatusOK,
+			wantPage:       PageRequest{Size: 1, Cursor: cursor},
+			wantCalled:     true,
+			wantIDs:        []string{first.ID.String()},
+			wantNextCursor: first.ID.String(),
+		},
+		{
+			name:       "returns empty list",
+			page:       &Page{Devices: []*Device{}},
+			wantStatus: http.StatusOK,
+			wantCalled: true,
+			wantIDs:    []string{},
+		},
+		{
+			name:       "rejects malformed cursor",
+			query:      "?cursor=not-a-uuid",
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid cursor",
+		},
+		{
+			name:       "rejects non-numeric limit",
+			query:      "?limit=ten",
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid limit",
+		},
+		{
+			name:       "maps invalid filter to bad request",
+			query:      "?brand=Apple&state=in-use",
+			listErr:    fmt.Errorf("%w: filter by brand or state, not both", ErrInvalidInput),
+			wantStatus: http.StatusBadRequest,
+			wantFilter: Filter{Brand: "Apple", State: StateInUse},
+			wantCalled: true,
+			wantError:  "invalid device input: filter by brand or state, not both",
+		},
+		{
+			name:       "hides unexpected errors",
+			listErr:    errors.New("connection refused"),
+			wantStatus: http.StatusInternalServerError,
+			wantCalled: true,
+			wantError:  "internal server error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &fakeService{page: tc.page, listErr: tc.listErr}
+			req := httptest.NewRequest(http.MethodGet, "/devices"+tc.query, nil)
+			rec := httptest.NewRecorder()
+
+			newTestMux(svc).ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got)
+			}
+			if svc.listCalled != tc.wantCalled {
+				t.Fatalf("service List called = %v, want %v", svc.listCalled, tc.wantCalled)
+			}
+			if tc.wantCalled {
+				if svc.lastFilter != tc.wantFilter {
+					t.Fatalf("service List filter = %+v, want %+v", svc.lastFilter, tc.wantFilter)
+				}
+				if svc.lastPage != tc.wantPage {
+					t.Fatalf("service List page = %+v, want %+v", svc.lastPage, tc.wantPage)
+				}
+			}
+
+			if tc.wantError != "" {
+				var body errorResponse
+				if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+					t.Fatalf("decode error body: %v", err)
+				}
+				if body.Error != tc.wantError {
+					t.Fatalf("error = %q, want %q", body.Error, tc.wantError)
+				}
+				return
+			}
+
+			var got map[string]json.RawMessage
+			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+
+			var devices []deviceResponse
+			if err := json.Unmarshal(got["devices"], &devices); err != nil {
+				t.Fatalf("decode devices %s: %v", got["devices"], err)
+			}
+			if devices == nil {
+				t.Fatalf("devices = %s, want a JSON array", got["devices"])
+			}
+			gotIDs := make([]string, len(devices))
+			for i, d := range devices {
+				gotIDs[i] = d.ID
+			}
+			if !slices.Equal(gotIDs, tc.wantIDs) {
+				t.Fatalf("device ids = %v, want %v", gotIDs, tc.wantIDs)
+			}
+
+			rawCursor, hasCursor := got["next_cursor"]
+			if tc.wantNextCursor == "" {
+				if hasCursor {
+					t.Fatalf("next_cursor = %s, want it absent", rawCursor)
+				}
+				return
+			}
+			var nextCursor string
+			if err := json.Unmarshal(rawCursor, &nextCursor); err != nil {
+				t.Fatalf("decode next_cursor %s: %v", rawCursor, err)
+			}
+			if nextCursor != tc.wantNextCursor {
+				t.Fatalf("next_cursor = %q, want %q", nextCursor, tc.wantNextCursor)
 			}
 		})
 	}
