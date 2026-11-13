@@ -22,7 +22,10 @@ type Handler struct {
 	logger  *slog.Logger
 }
 
-func NewHandler(service deviceService, logger *slog.Logger) *Handler {
+func NewHandler(
+	service deviceService,
+	logger *slog.Logger,
+) *Handler {
 	return &Handler{service: service, logger: logger}
 }
 

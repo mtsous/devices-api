@@ -11,8 +11,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/mtsous/devices-api/internal/config"
+	"github.com/mtsous/devices-api/internal/device"
 	"github.com/mtsous/devices-api/internal/health"
+	"github.com/mtsous/devices-api/internal/postgres"
 	"github.com/mtsous/devices-api/internal/router"
 )
 
@@ -40,13 +44,28 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	srv := newServer(cfg, logger)
+	// The pool connects lazily on the first query.
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("create database pool: %w", err)
+	}
+	defer pool.Close()
+
+	repo := postgres.NewDeviceRepository(pool)
+
+	deviceService := device.NewService(repo, logger)
+
+	deviceHandler := device.NewHandler(deviceService, logger)
+
+	srv := newServer(cfg, logger, deviceHandler)
+
 	return serve(ctx, srv, logger)
 }
 
-func newServer(cfg config.Config, logger *slog.Logger) *http.Server {
+func newServer(cfg config.Config, logger *slog.Logger, deviceHandler *device.Handler) *http.Server {
 	handler := router.New(
 		health.NewHandler(logger),
+		deviceHandler,
 	)
 
 	return &http.Server{

@@ -7,12 +7,14 @@ import (
 )
 
 type Config struct {
-	Port string
+	Port        string
+	DatabaseURL string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		Port: getEnv("PORT", "8080"),
+		Port:        getEnv("PORT", "8080"),
+		DatabaseURL: os.Getenv("DATABASE_URL"),
 	}
 
 	if p, err := strconv.Atoi(cfg.Port); err != nil || p < 1 || p > 65535 {
