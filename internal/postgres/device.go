@@ -90,7 +90,7 @@ func (r *DeviceRepository) List(
 	}
 
 	if filter.Brand != "" {
-		addCondition("brand = $%d", filter.Brand)
+		addCondition("lower(brand) = lower($%d)", filter.Brand)
 	}
 	if filter.State != "" {
 		addCondition("state = $%d", filter.State)

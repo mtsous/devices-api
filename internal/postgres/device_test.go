@@ -437,6 +437,12 @@ func TestDeviceRepositoryList(t *testing.T) {
 			wantIDs: []uuid.UUID{apple1, apple2},
 		},
 		{
+			name:    "filters by brand case-insensitively",
+			filter:  device.Filter{Brand: "aPPLE"},
+			page:    device.PageRequest{Size: 10},
+			wantIDs: []uuid.UUID{apple1, apple2},
+		},
+		{
 			name:    "filters by state",
 			filter:  device.Filter{State: device.StateInUse},
 			page:    device.PageRequest{Size: 10},
