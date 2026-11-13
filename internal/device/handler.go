@@ -66,8 +66,9 @@ type deviceResponse struct {
 }
 
 type listDevicesResponse struct {
-	Devices    []deviceResponse `json:"devices"`
+	Count      int              `json:"count,omitempty"`
 	NextCursor string           `json:"next_cursor,omitempty"`
+	Devices    []deviceResponse `json:"devices"`
 }
 
 type errorResponse struct {
@@ -154,7 +155,11 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := listDevicesResponse{Devices: make([]deviceResponse, len(result.Devices))}
+	count := len(result.Devices)
+	resp := listDevicesResponse{
+		Count:   count,
+		Devices: make([]deviceResponse, count),
+	}
 	for i, d := range result.Devices {
 		resp.Devices[i] = toDeviceResponse(d)
 	}
