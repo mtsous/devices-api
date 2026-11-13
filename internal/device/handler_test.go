@@ -98,6 +98,33 @@ func newTestMux(svc deviceService) *http.ServeMux {
 	return mux
 }
 
+func assertErrorBody(t *testing.T, rec *httptest.ResponseRecorder, want string) {
+	t.Helper()
+	var body errorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if body.Error != want {
+		t.Fatalf("error = %q, want %q", body.Error, want)
+	}
+}
+
+func assertJSONFields(t *testing.T, rec *httptest.ResponseRecorder, want map[string]any) {
+	t.Helper()
+	var got map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("response = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("response[%q] = %v, want %v", k, got[k], v)
+		}
+	}
+}
+
 func formatParams(p UpdateParams) string {
 	show := func(v any, isNil bool) string {
 		if isNil {
@@ -133,9 +160,9 @@ func TestHandlerCreate(t *testing.T) {
 		body      string
 		createErr error
 
-		wantStatus      int
-		wantInput       *Device // what the handler passes to the service; nil means not called
-		wantErrContains string
+		wantStatus int
+		wantInput  *Device // what the handler passes to the service; nil means not called
+		wantError  string
 	}{
 		{
 			name:       "creates device",
@@ -150,52 +177,52 @@ func TestHandlerCreate(t *testing.T) {
 			wantInput:  &Device{Name: "iPhone", Brand: "Apple"},
 		},
 		{
-			name:            "rejects malformed json",
-			body:            `{"name":`,
-			wantStatus:      http.StatusBadRequest,
-			wantErrContains: "invalid request body",
+			name:       "rejects malformed json",
+			body:       `{"name":`,
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid request body",
 		},
 		{
-			name:            "rejects unknown fields",
-			body:            `{"name":"iPhone","brand":"Apple","created_at":"2020-01-01T00:00:00Z"}`,
-			wantStatus:      http.StatusBadRequest,
-			wantErrContains: "invalid request body",
+			name:       "rejects unknown fields",
+			body:       `{"name":"iPhone","brand":"Apple","created_at":"2020-01-01T00:00:00Z"}`,
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid request body",
 		},
 		{
-			name:            "rejects multiple json objects",
-			body:            `{"name":"iPhone","brand":"Apple"}{"name":"Pixel"}`,
-			wantStatus:      http.StatusBadRequest,
-			wantErrContains: "invalid request body",
+			name:       "rejects multiple json objects",
+			body:       `{"name":"iPhone","brand":"Apple"}{"name":"Pixel"}`,
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid request body",
 		},
 		{
-			name:            "rejects empty body",
-			body:            ``,
-			wantStatus:      http.StatusBadRequest,
-			wantErrContains: "invalid request body",
+			name:       "rejects empty body",
+			body:       ``,
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid request body",
 		},
 		{
-			name:            "maps invalid input to bad request",
-			body:            `{"name":"","brand":"Apple"}`,
-			createErr:       fmt.Errorf("%w: name is required", ErrInvalidInput),
-			wantStatus:      http.StatusBadRequest,
-			wantInput:       &Device{Brand: "Apple"},
-			wantErrContains: "name is required",
+			name:       "maps invalid input to bad request",
+			body:       `{"name":"","brand":"Apple"}`,
+			createErr:  fmt.Errorf("%w: name is required", ErrInvalidInput),
+			wantStatus: http.StatusBadRequest,
+			wantInput:  &Device{Brand: "Apple"},
+			wantError:  "invalid device input: name is required",
 		},
 		{
-			name:            "maps invalid state to bad request",
-			body:            `{"name":"iPhone","brand":"Apple","state":"broken"}`,
-			createErr:       fmt.Errorf("%w: %q", ErrInvalidState, "broken"),
-			wantStatus:      http.StatusBadRequest,
-			wantInput:       &Device{Name: "iPhone", Brand: "Apple", State: "broken"},
-			wantErrContains: "invalid device state",
+			name:       "maps invalid state to bad request",
+			body:       `{"name":"iPhone","brand":"Apple","state":"broken"}`,
+			createErr:  fmt.Errorf("%w: %q", ErrInvalidState, "broken"),
+			wantStatus: http.StatusBadRequest,
+			wantInput:  &Device{Name: "iPhone", Brand: "Apple", State: "broken"},
+			wantError:  `invalid device state: "broken"`,
 		},
 		{
-			name:            "hides unexpected errors",
-			body:            `{"name":"iPhone","brand":"Apple"}`,
-			createErr:       errors.New("connection refused"),
-			wantStatus:      http.StatusInternalServerError,
-			wantInput:       &Device{Name: "iPhone", Brand: "Apple"},
-			wantErrContains: "internal server error",
+			name:       "hides unexpected errors",
+			body:       `{"name":"iPhone","brand":"Apple"}`,
+			createErr:  errors.New("connection refused"),
+			wantStatus: http.StatusInternalServerError,
+			wantInput:  &Device{Name: "iPhone", Brand: "Apple"},
+			wantError:  "internal server error",
 		},
 	}
 
@@ -222,44 +249,21 @@ func TestHandlerCreate(t *testing.T) {
 				assertDeviceEqual(t, svc.lastCreate, *tc.wantInput)
 			}
 
-			if tc.wantErrContains != "" {
-				var body errorResponse
-				if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-					t.Fatalf("decode error body: %v", err)
-				}
-				if !strings.Contains(body.Error, tc.wantErrContains) {
-					t.Fatalf("error = %q, want it to contain %q", body.Error, tc.wantErrContains)
-				}
-
-				errIsConnectionRefused := strings.Contains(body.Error, "connection refused")
-				if tc.wantStatus == http.StatusInternalServerError && errIsConnectionRefused {
-					t.Fatalf("error = %q leaks internal details", body.Error)
-				}
+			if tc.wantError != "" {
+				assertErrorBody(t, rec, tc.wantError)
 				return
 			}
 
 			if got, want := rec.Header().Get("Location"), "/devices/"+created.ID.String(); got != want {
 				t.Fatalf("Location = %q, want %q", got, want)
 			}
-			var got map[string]any
-			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-				t.Fatalf("decode response: %v", err)
-			}
-			want := map[string]any{
+			assertJSONFields(t, rec, map[string]any{
 				"id":         created.ID.String(),
 				"name":       "iPhone",
 				"brand":      "Apple",
 				"state":      "available",
 				"created_at": "2026-01-01T12:00:00Z",
-			}
-			if len(got) != len(want) {
-				t.Fatalf("response = %v, want %v", got, want)
-			}
-			for k, v := range want {
-				if got[k] != v {
-					t.Fatalf("response[%q] = %v, want %v", k, got[k], v)
-				}
-			}
+			})
 		})
 	}
 }
@@ -280,9 +284,9 @@ func TestHandlerGet(t *testing.T) {
 		id     string
 		getErr error
 
-		wantStatus      int
-		wantCalled      bool
-		wantErrContains string
+		wantStatus int
+		wantCalled bool
+		wantError  string
 	}{
 		{
 			name:       "returns device",
@@ -291,26 +295,26 @@ func TestHandlerGet(t *testing.T) {
 			wantCalled: true,
 		},
 		{
-			name:            "rejects malformed id",
-			id:              "not-a-uuid",
-			wantStatus:      http.StatusBadRequest,
-			wantErrContains: "invalid device id",
+			name:       "rejects malformed id",
+			id:         "not-a-uuid",
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid device id",
 		},
 		{
-			name:            "maps not found to 404",
-			id:              device.ID.String(),
-			getErr:          fmt.Errorf("get device %s: %w", device.ID, ErrNotFound),
-			wantStatus:      http.StatusNotFound,
-			wantCalled:      true,
-			wantErrContains: "device not found",
+			name:       "maps not found to 404",
+			id:         device.ID.String(),
+			getErr:     fmt.Errorf("get device %s: %w", device.ID, ErrNotFound),
+			wantStatus: http.StatusNotFound,
+			wantCalled: true,
+			wantError:  "device not found",
 		},
 		{
-			name:            "hides unexpected errors",
-			id:              device.ID.String(),
-			getErr:          errors.New("connection refused"),
-			wantStatus:      http.StatusInternalServerError,
-			wantCalled:      true,
-			wantErrContains: "internal server error",
+			name:       "hides unexpected errors",
+			id:         device.ID.String(),
+			getErr:     errors.New("connection refused"),
+			wantStatus: http.StatusInternalServerError,
+			wantCalled: true,
+			wantError:  "internal server error",
 		},
 	}
 
@@ -335,37 +339,19 @@ func TestHandlerGet(t *testing.T) {
 				t.Fatalf("service Get id = %s, want %s", svc.lastGetID, device.ID)
 			}
 
-			if tc.wantErrContains != "" {
-				var body errorResponse
-				if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-					t.Fatalf("decode error body: %v", err)
-				}
-				if body.Error != tc.wantErrContains {
-					t.Fatalf("error = %q, want %q", body.Error, tc.wantErrContains)
-				}
+			if tc.wantError != "" {
+				assertErrorBody(t, rec, tc.wantError)
 				return
 			}
 
-			var got map[string]any
-			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-				t.Fatalf("decode response: %v", err)
-			}
-			want := map[string]any{
+			assertJSONFields(t, rec, map[string]any{
 				"id":         device.ID.String(),
 				"name":       "Pixel",
 				"brand":      "Google",
 				"state":      "in-use",
 				"created_at": "2026-01-01T12:00:00Z",
 				"updated_at": "2026-02-01T08:30:00Z",
-			}
-			if len(got) != len(want) {
-				t.Fatalf("response = %v, want %v", got, want)
-			}
-			for k, v := range want {
-				if got[k] != v {
-					t.Fatalf("response[%q] = %v, want %v", k, got[k], v)
-				}
-			}
+			})
 		})
 	}
 }
@@ -444,13 +430,7 @@ func TestHandlerDelete(t *testing.T) {
 				}
 				return
 			}
-			var body errorResponse
-			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-				t.Fatalf("decode error body: %v", err)
-			}
-			if body.Error != tc.wantError {
-				t.Fatalf("error = %q, want %q", body.Error, tc.wantError)
-			}
+			assertErrorBody(t, rec, tc.wantError)
 		})
 	}
 }
@@ -593,36 +573,18 @@ func TestHandlerUpdate(t *testing.T) {
 			}
 
 			if tc.wantError != "" {
-				var body errorResponse
-				if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-					t.Fatalf("decode error body: %v", err)
-				}
-				if body.Error != tc.wantError {
-					t.Fatalf("error = %q, want %q", body.Error, tc.wantError)
-				}
+				assertErrorBody(t, rec, tc.wantError)
 				return
 			}
 
-			var got map[string]any
-			if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-				t.Fatalf("decode response: %v", err)
-			}
-			want := map[string]any{
+			assertJSONFields(t, rec, map[string]any{
 				"id":         id.String(),
 				"name":       "Galaxy",
 				"brand":      "Samsung",
 				"state":      "inactive",
 				"created_at": "2026-01-01T12:00:00Z",
 				"updated_at": "2026-03-01T09:00:00Z",
-			}
-			if len(got) != len(want) {
-				t.Fatalf("response = %v, want %v", got, want)
-			}
-			for k, v := range want {
-				if got[k] != v {
-					t.Fatalf("response[%q] = %v, want %v", k, got[k], v)
-				}
-			}
+			})
 		})
 	}
 }
@@ -757,13 +719,7 @@ func TestHandlerList(t *testing.T) {
 			}
 
 			if tc.wantError != "" {
-				var body errorResponse
-				if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-					t.Fatalf("decode error body: %v", err)
-				}
-				if body.Error != tc.wantError {
-					t.Fatalf("error = %q, want %q", body.Error, tc.wantError)
-				}
+				assertErrorBody(t, rec, tc.wantError)
 				return
 			}
 
