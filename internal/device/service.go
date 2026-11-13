@@ -128,8 +128,6 @@ func (s *Service) Update(
 		return ruleErr
 	})
 	if ruleErr != nil {
-		// Rule violations are client errors: return them as-is so the
-		// handler shows only the domain message.
 		return nil, ruleErr
 	}
 	if err != nil {
