@@ -2,10 +2,10 @@ package device
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -20,11 +20,18 @@ type Service struct {
 	logger *slog.Logger
 }
 
-func NewService(config Config) *Service {
+func NewService(config Config) (*Service, error) {
+	if config.Repo == nil {
+		return nil, errors.New("device.NewService: Config.Repo is required")
+	}
+	if config.Logger == nil {
+		return nil, errors.New("device.NewService: Config.Logger is required")
+	}
+
 	return &Service{
 		repo:   config.Repo,
 		logger: config.Logger,
-	}
+	}, nil
 }
 
 func (s *Service) Create(ctx context.Context, device Device) (*Device, error) {
@@ -44,8 +51,6 @@ func (s *Service) Create(ctx context.Context, device Device) (*Device, error) {
 	}
 
 	device.ID = id
-	device.CreatedAt = time.Now().UTC()
-	device.UpdatedAt = nil
 
 	created, err := s.repo.Create(ctx, device)
 	if err != nil {
@@ -119,7 +124,22 @@ func (s *Service) Update(
 }
 
 func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
-	panic("not implemented")
+	device, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return fmt.Errorf("delete device %s: %w", id, err)
+	}
+
+	if device.State == StateInUse {
+		return fmt.Errorf("delete device %s: %w", id, ErrInUse)
+	}
+
+	if err := s.repo.Delete(ctx, id); err != nil {
+		return fmt.Errorf("delete device %s: %w", id, err)
+	}
+
+	s.logger.InfoContext(ctx, "device deleted", "device_id", id)
+
+	return nil
 }
 
 func validate(device Device) error {

@@ -31,6 +31,7 @@ type Device struct {
 	State     State
 	CreatedAt time.Time
 	UpdatedAt *time.Time
+	DeletedAt *time.Time
 }
 
 var (

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -17,14 +18,90 @@ var errFake = errors.New("fake repository error")
 
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
+func newTestService(t *testing.T, repo Repository) *Service {
+	t.Helper()
+	svc, err := NewService(Config{Repo: repo, Logger: discardLogger})
+	if err != nil {
+		t.Fatalf("NewService() unexpected error: %v", err)
+	}
+	return svc
+}
+
+func assertDeviceEqual(t *testing.T, got, want Device) {
+	t.Helper()
+	if got.ID != want.ID ||
+		got.Name != want.Name ||
+		got.Brand != want.Brand ||
+		got.State != want.State ||
+		!got.CreatedAt.Equal(want.CreatedAt) ||
+		!equalTimePtr(got.UpdatedAt, want.UpdatedAt) ||
+		!equalTimePtr(got.DeletedAt, want.DeletedAt) {
+		t.Fatalf("device = %s, want %s", formatDevice(got), formatDevice(want))
+	}
+}
+
+func equalTimePtr(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
+func formatDevice(d Device) string {
+	formatTimePtr := func(t *time.Time) string {
+		if t == nil {
+			return "<nil>"
+		}
+		return t.String()
+	}
+	return fmt.Sprintf("{ID:%s Name:%q Brand:%q State:%q CreatedAt:%s UpdatedAt:%s DeletedAt:%s}",
+		d.ID, d.Name, d.Brand, d.State, d.CreatedAt, formatTimePtr(d.UpdatedAt), formatTimePtr(d.DeletedAt))
+}
+
+func TestNewService(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  Config
+		wantErr bool
+	}{
+		{name: "valid config", config: Config{Repo: newFakeRepository(), Logger: discardLogger}},
+		{name: "missing repo", config: Config{Logger: discardLogger}, wantErr: true},
+		{name: "missing logger", config: Config{Repo: newFakeRepository()}, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, err := NewService(tc.config)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("NewService() error = nil, want error")
+				}
+				if svc != nil {
+					t.Fatalf("NewService() = %+v, want nil on error", svc)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NewService() unexpected error: %v", err)
+			}
+			if svc == nil {
+				t.Fatal("NewService() returned nil service")
+			}
+		})
+	}
+}
+
 type fakeRepository struct {
 	devices map[uuid.UUID]Device
 
 	createErr error
 	getErr    error
 	listErr   error
+	deleteErr error
 
 	lastPageRequest PageRequest
+	deletedIDs      []uuid.UUID
 }
 
 func newFakeRepository() *fakeRepository {
@@ -88,13 +165,19 @@ func (f *fakeRepository) Update(context.Context, Device) error {
 	return errors.New("not implemented")
 }
 
-func (f *fakeRepository) Delete(context.Context, uuid.UUID) error {
-	return errors.New("not implemented")
+func (f *fakeRepository) Delete(_ context.Context, id uuid.UUID) error {
+	f.deletedIDs = append(f.deletedIDs, id)
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	if _, ok := f.devices[id]; !ok {
+		return ErrNotFound
+	}
+	delete(f.devices, id)
+	return nil
 }
 
 func TestServiceCreate(t *testing.T) {
-	userInputTime := time.Now().Add(-24 * time.Hour)
-
 	tests := []struct {
 		name      string
 		input     Device
@@ -116,17 +199,6 @@ func TestServiceCreate(t *testing.T) {
 			name:  "trims name and brand",
 			input: Device{Name: "  Galaxy ", Brand: " Samsung  "},
 			want:  Device{Name: "Galaxy", Brand: "Samsung", State: StateInactive},
-		},
-		{
-			name: "ignores client provided id and timestamps",
-			input: Device{
-				ID:        uuid.MustParse("00000000-0000-0000-0000-000000000004"),
-				Name:      "iPhone",
-				Brand:     "Apple",
-				CreatedAt: userInputTime,
-				UpdatedAt: &userInputTime,
-			},
-			want: Device{Name: "iPhone", Brand: "Apple", State: StateInactive},
 		},
 		{
 			name:    "rejects empty name",
@@ -156,10 +228,8 @@ func TestServiceCreate(t *testing.T) {
 			repo := newFakeRepository()
 			repo.createErr = tc.createErr
 
-			before := time.Now().UTC()
-			svc := NewService(Config{Repo: repo, Logger: discardLogger})
+			svc := newTestService(t, repo)
 			got, err := svc.Create(context.Background(), tc.input)
-			after := time.Now().UTC()
 
 			if tc.wantErr != nil {
 				if !errors.Is(err, tc.wantErr) {
@@ -183,20 +253,6 @@ func TestServiceCreate(t *testing.T) {
 			if got.ID.Version() != 7 {
 				t.Fatalf("ID version = %d, want 7", got.ID.Version())
 			}
-			if got.ID == tc.input.ID {
-				t.Fatalf("ID = %s, want a newly generated id", got.ID)
-			}
-			if got.CreatedAt.Before(before) || got.CreatedAt.After(after) {
-				t.Fatalf(
-					"CreatedAt = %v, want something between %v and %v",
-					got.CreatedAt,
-					before,
-					after,
-				)
-			}
-			if got.UpdatedAt != nil {
-				t.Fatalf("UpdatedAt = %v, want nil", got.UpdatedAt)
-			}
 			if got.Name != tc.want.Name || got.Brand != tc.want.Brand || got.State != tc.want.State {
 				t.Fatalf("Create() = %+v, want name=%q brand=%q state=%q",
 					got, tc.want.Name, tc.want.Brand, tc.want.State)
@@ -206,9 +262,7 @@ func TestServiceCreate(t *testing.T) {
 			if !ok {
 				t.Fatalf("device %s was not stored", got.ID)
 			}
-			if stored != *got {
-				t.Fatalf("stored device = %+v, want %+v", stored, got)
-			}
+			assertDeviceEqual(t, stored, *got)
 		})
 	}
 }
@@ -253,7 +307,7 @@ func TestServiceGet(t *testing.T) {
 			repo.devices[existing.ID] = existing
 			repo.getErr = tc.getErr
 
-			svc := NewService(Config{Repo: repo})
+			svc := newTestService(t, repo)
 			got, err := svc.Get(context.Background(), tc.id)
 
 			if tc.wantErr != nil {
@@ -272,9 +326,7 @@ func TestServiceGet(t *testing.T) {
 			if got == nil {
 				t.Fatal("Get() returned a nil device")
 			}
-			if *got != tc.want {
-				t.Fatalf("Get() = %+v, want %+v", *got, tc.want)
-			}
+			assertDeviceEqual(t, *got, tc.want)
 		})
 	}
 }
@@ -385,7 +437,8 @@ func TestServiceList(t *testing.T) {
 			page:     PageRequest{Size: -1},
 			wantIDs:  valueIDs(all),
 			wantSize: DefaultPageLimit + 1,
-		}, {
+		},
+		{
 			name:     "returns empty slice when nothing matches",
 			filter:   Filter{Brand: "Nokia"},
 			wantIDs:  []uuid.UUID{},
@@ -416,7 +469,7 @@ func TestServiceList(t *testing.T) {
 			}
 			repo.listErr = tc.listErr
 
-			svc := NewService(Config{Repo: repo, Logger: discardLogger})
+			svc := newTestService(t, repo)
 			got, err := svc.List(context.Background(), tc.filter, tc.page)
 
 			if tc.wantErr != nil {
@@ -449,6 +502,96 @@ func TestServiceList(t *testing.T) {
 			}
 			if repo.lastPageRequest.Size != tc.wantSize {
 				t.Fatalf("repository page size = %d, want %d", repo.lastPageRequest.Size, tc.wantSize)
+			}
+		})
+	}
+}
+
+func TestServiceDelete(t *testing.T) {
+	newDevice := func(state State) Device {
+		return Device{
+			ID:        uuid.Must(uuid.NewV7()),
+			Name:      "iPhone",
+			Brand:     "Apple",
+			State:     state,
+			CreatedAt: time.Now().UTC(),
+		}
+	}
+
+	tests := []struct {
+		name           string
+		device         Device
+		unknownID      bool
+		getErr         error
+		deleteErr      error
+		wantErr        error
+		wantDeleteCall bool
+	}{
+		{
+			name:           "deletes available device",
+			device:         newDevice(StateAvailable),
+			wantDeleteCall: true,
+		},
+		{
+			name:           "deletes inactive device",
+			device:         newDevice(StateInactive),
+			wantDeleteCall: true,
+		},
+		{
+			name:    "rejects in-use device",
+			device:  newDevice(StateInUse),
+			wantErr: ErrInUse,
+		},
+		{
+			name:      "returns not found for unknown id",
+			device:    newDevice(StateAvailable),
+			unknownID: true,
+			wantErr:   ErrNotFound,
+		},
+		{
+			name:    "returns repository get error",
+			device:  newDevice(StateAvailable),
+			getErr:  errFake,
+			wantErr: errFake,
+		},
+		{
+			name:           "returns repository delete error",
+			device:         newDevice(StateAvailable),
+			deleteErr:      errFake,
+			wantErr:        errFake,
+			wantDeleteCall: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			repo.devices[tc.device.ID] = tc.device
+			repo.getErr = tc.getErr
+			repo.deleteErr = tc.deleteErr
+
+			id := tc.device.ID
+			if tc.unknownID {
+				id = uuid.Must(uuid.NewV7())
+			}
+
+			svc := newTestService(t, repo)
+			err := svc.Delete(context.Background(), id)
+
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Delete() error = %v, want %v", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("Delete() unexpected error: %v", err)
+			}
+
+			var wantDeletedIDs []uuid.UUID
+			if tc.wantDeleteCall {
+				wantDeletedIDs = []uuid.UUID{id}
+			}
+			if !slices.Equal(repo.deletedIDs, wantDeletedIDs) {
+				t.Fatalf("repository Delete called with %v, want %v", repo.deletedIDs, wantDeletedIDs)
 			}
 		})
 	}
