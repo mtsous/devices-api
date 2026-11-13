@@ -2,7 +2,6 @@ package device
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -20,18 +19,11 @@ type Service struct {
 	logger *slog.Logger
 }
 
-func NewService(config Config) (*Service, error) {
-	if config.Repo == nil {
-		return nil, errors.New("device.NewService: Config.Repo is required")
-	}
-	if config.Logger == nil {
-		return nil, errors.New("device.NewService: Config.Logger is required")
-	}
-
+func NewService(config Config) *Service {
 	return &Service{
 		repo:   config.Repo,
 		logger: config.Logger,
-	}, nil
+	}
 }
 
 func (s *Service) Create(ctx context.Context, device Device) (*Device, error) {
