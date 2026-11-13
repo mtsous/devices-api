@@ -121,10 +121,17 @@ func (s *Service) Update(
 	}
 
 	var previousState State
+	var ruleErr error
 	updated, err := s.repo.Update(ctx, id, func(d *Device) error {
 		previousState = d.State
-		return applyUpdate(d, params)
+		ruleErr = applyUpdate(d, params)
+		return ruleErr
 	})
+	if ruleErr != nil {
+		// Rule violations are client errors: return them as-is so the
+		// handler shows only the domain message.
+		return nil, ruleErr
+	}
 	if err != nil {
 		return nil, fmt.Errorf("update device %s: %w", id, err)
 	}

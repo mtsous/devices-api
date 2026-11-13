@@ -640,3 +640,54 @@ func TestServiceUpdate(t *testing.T) {
 		})
 	}
 }
+
+func TestServiceUpdateErrorMessages(t *testing.T) {
+	tests := []struct {
+		name      string
+		stored    Device
+		params    UpdateParams
+		updateErr error
+		wantMsg   string
+	}{
+		{
+			name:    "validation error is not wrapped",
+			stored:  newTestDevice(StateAvailable),
+			params:  UpdateParams{Name: new("  ")},
+			wantMsg: "invalid device input: name is required",
+		},
+		{
+			name:    "in-use error is not wrapped",
+			stored:  newTestDevice(StateInUse),
+			params:  UpdateParams{Name: new("Galaxy")},
+			wantMsg: "device is in use: name and brand cannot change",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			repo.devices[tc.stored.ID] = tc.stored
+
+			svc := NewService(repo, discardLogger)
+			_, err := svc.Update(context.Background(), tc.stored.ID, tc.params)
+
+			if err == nil || err.Error() != tc.wantMsg {
+				t.Fatalf("Update() error = %v, want %q", err, tc.wantMsg)
+			}
+		})
+	}
+
+	t.Run("repository error keeps the device id", func(t *testing.T) {
+		stored := newTestDevice(StateAvailable)
+		repo := newFakeRepository()
+		repo.devices[stored.ID] = stored
+		repo.updateErr = errFakeRepo
+
+		svc := NewService(repo, discardLogger)
+		_, err := svc.Update(context.Background(), stored.ID, UpdateParams{Name: new("Galaxy")})
+
+		if want := "update device " + stored.ID.String() + ": " + errFakeRepo.Error(); err == nil || err.Error() != want {
+			t.Fatalf("Update() error = %v, want %q", err, want)
+		}
+	})
+}
