@@ -208,22 +208,6 @@ func TestHandlerCreate(t *testing.T) {
 			wantInput:  &Device{Brand: "Apple"},
 			wantError:  "invalid device input: name is required",
 		},
-		{
-			name:       "maps invalid state to bad request",
-			body:       `{"name":"iPhone","brand":"Apple","state":"broken"}`,
-			createErr:  fmt.Errorf("%w: %q", ErrInvalidState, "broken"),
-			wantStatus: http.StatusBadRequest,
-			wantInput:  &Device{Name: "iPhone", Brand: "Apple", State: "broken"},
-			wantError:  `invalid device state: "broken"`,
-		},
-		{
-			name:       "hides unexpected errors",
-			body:       `{"name":"iPhone","brand":"Apple"}`,
-			createErr:  errors.New("connection refused"),
-			wantStatus: http.StatusInternalServerError,
-			wantInput:  &Device{Name: "iPhone", Brand: "Apple"},
-			wantError:  "internal server error",
-		},
 	}
 
 	for _, tc := range tests {
@@ -308,14 +292,6 @@ func TestHandlerGet(t *testing.T) {
 			wantCalled: true,
 			wantError:  "device not found",
 		},
-		{
-			name:       "hides unexpected errors",
-			id:         device.ID.String(),
-			getErr:     errors.New("connection refused"),
-			wantStatus: http.StatusInternalServerError,
-			wantCalled: true,
-			wantError:  "internal server error",
-		},
 	}
 
 	for _, tc := range tests {
@@ -381,28 +357,12 @@ func TestHandlerDelete(t *testing.T) {
 			wantError:  "invalid device id",
 		},
 		{
-			name:       "maps not found to 404",
-			id:         id.String(),
-			deleteErr:  fmt.Errorf("delete device %s: %w", id, ErrNotFound),
-			wantStatus: http.StatusNotFound,
-			wantCalled: true,
-			wantError:  "device not found",
-		},
-		{
 			name:       "maps in use to 409",
 			id:         id.String(),
 			deleteErr:  fmt.Errorf("delete device %s: %w", id, ErrInUse),
 			wantStatus: http.StatusConflict,
 			wantCalled: true,
 			wantError:  "device is in use",
-		},
-		{
-			name:       "hides unexpected errors",
-			id:         id.String(),
-			deleteErr:  errors.New("connection refused"),
-			wantStatus: http.StatusInternalServerError,
-			wantCalled: true,
-			wantError:  "internal server error",
 		},
 	}
 
@@ -514,33 +474,6 @@ func TestHandlerUpdate(t *testing.T) {
 			body:       `{"created_at":"2020-01-01T00:00:00Z"}`,
 			wantStatus: http.StatusBadRequest,
 			wantError:  "invalid request body",
-		},
-		{
-			name:       "maps not found to 404",
-			id:         id.String(),
-			body:       `{"name":"Galaxy"}`,
-			updateErr:  fmt.Errorf("update device %s: %w", id, ErrNotFound),
-			wantStatus: http.StatusNotFound,
-			wantParams: &UpdateParams{Name: new("Galaxy")},
-			wantError:  "device not found",
-		},
-		{
-			name:       "maps in use to 409",
-			id:         id.String(),
-			body:       `{"brand":"Samsung"}`,
-			updateErr:  fmt.Errorf("update device %s: %w", id, ErrInUse),
-			wantStatus: http.StatusConflict,
-			wantParams: &UpdateParams{Brand: new("Samsung")},
-			wantError:  "device is in use",
-		},
-		{
-			name:       "hides unexpected errors",
-			id:         id.String(),
-			body:       `{"name":"Galaxy"}`,
-			updateErr:  errors.New("connection refused"),
-			wantStatus: http.StatusInternalServerError,
-			wantParams: &UpdateParams{Name: new("Galaxy")},
-			wantError:  "internal server error",
 		},
 	}
 
@@ -683,13 +616,6 @@ func TestHandlerList(t *testing.T) {
 			wantCalled: true,
 			wantError:  "invalid device input: filter by brand or state, not both",
 		},
-		{
-			name:       "hides unexpected errors",
-			listErr:    errors.New("connection refused"),
-			wantStatus: http.StatusInternalServerError,
-			wantCalled: true,
-			wantError:  "internal server error",
-		},
 	}
 
 	for _, tc := range tests {
@@ -757,6 +683,67 @@ func TestHandlerList(t *testing.T) {
 			if nextCursor != tc.wantNextCursor {
 				t.Fatalf("next_cursor = %q, want %q", nextCursor, tc.wantNextCursor)
 			}
+		})
+	}
+}
+
+// Covers the error-to-status mapping shared by every handler.
+func TestWriteServiceError(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantError  string
+	}{
+		{
+			name:       "invalid input is a bad request with its message",
+			err:        fmt.Errorf("%w: name is required", ErrInvalidInput),
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid device input: name is required",
+		},
+		{
+			name:       "invalid state is a bad request with its message",
+			err:        fmt.Errorf("%w: %q", ErrInvalidState, "broken"),
+			wantStatus: http.StatusBadRequest,
+			wantError:  `invalid device state: "broken"`,
+		},
+		{
+			name:       "not found is 404 with a fixed message",
+			err:        fmt.Errorf("get device %s: %w", id, ErrNotFound),
+			wantStatus: http.StatusNotFound,
+			wantError:  "device not found",
+		},
+		{
+			name:       "in use is 409 with a fixed message",
+			err:        fmt.Errorf("delete device %s: %w", id, ErrInUse),
+			wantStatus: http.StatusConflict,
+			wantError:  "device is in use",
+		},
+		{
+			name:       "unexpected errors are 500 without internal details",
+			err:        errors.New("connection refused"),
+			wantStatus: http.StatusInternalServerError,
+			wantError:  "internal server error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHandler(&fakeService{}, discardLogger)
+			req := httptest.NewRequest(http.MethodGet, "/devices", nil)
+			rec := httptest.NewRecorder()
+
+			h.writeServiceError(rec, req, tc.err)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got)
+			}
+			assertErrorBody(t, rec, tc.wantError)
 		})
 	}
 }
