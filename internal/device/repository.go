@@ -42,6 +42,6 @@ type Repository interface {
 		filter Filter,
 		pageRequest PageRequest,
 	) ([]*Device, error)
-	Update(ctx context.Context, device Device) error
+	Update(ctx context.Context, id uuid.UUID, fn func(d *Device) error) (*Device, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 }

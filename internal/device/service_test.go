@@ -69,8 +69,8 @@ func (f *fakeRepository) List(_ context.Context, filter Filter, page PageRequest
 	return f.listResult[:min(page.Size, len(f.listResult))], nil
 }
 
-func (f *fakeRepository) Update(context.Context, Device) error {
-	return errors.New("not implemented")
+func (f *fakeRepository) Update(context.Context, uuid.UUID, func(d *Device) error) (*Device, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (f *fakeRepository) Delete(_ context.Context, id uuid.UUID) error {

@@ -78,8 +78,8 @@ func (r *DeviceRepository) List(context.Context, device.Filter, device.PageReque
 	return nil, errors.New("not implemented")
 }
 
-func (r *DeviceRepository) Update(context.Context, device.Device) error {
-	return errors.New("not implemented")
+func (r *DeviceRepository) Update(context.Context, uuid.UUID, func(d *device.Device) error) (*device.Device, error) {
+	return nil, errors.New("not implemented")
 }
 
 func (r *DeviceRepository) Delete(ctx context.Context, id uuid.UUID) error {

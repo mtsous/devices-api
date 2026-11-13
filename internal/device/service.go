@@ -2,7 +2,6 @@ package device
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -117,7 +116,45 @@ func (s *Service) Update(
 	id uuid.UUID,
 	params UpdateParams,
 ) (*Device, error) {
-	return nil, errors.New("not implemented")
+	if params.Name == nil && params.Brand == nil && params.State == nil {
+		return nil, fmt.Errorf("%w: no fields to update", ErrInvalidInput)
+	}
+
+	var previousState State
+	updated, err := s.repo.Update(ctx, id, func(d *Device) error {
+		previousState = d.State
+		return applyUpdate(d, params)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("update device %s: %w", id, err)
+	}
+
+	s.logger.InfoContext(ctx, "device updated",
+		"device_id", updated.ID,
+		"previous_state", previousState,
+		"state", updated.State,
+	)
+
+	return updated, nil
+}
+
+func applyUpdate(d *Device, params UpdateParams) error {
+	name, brand := d.Name, d.Brand
+	if params.Name != nil {
+		name = strings.TrimSpace(*params.Name)
+	}
+	if params.Brand != nil {
+		brand = strings.TrimSpace(*params.Brand)
+	}
+	if d.State == StateInUse && (name != d.Name || brand != d.Brand) {
+		return fmt.Errorf("%w: name and brand cannot change", ErrInUse)
+	}
+
+	d.Name, d.Brand = name, brand
+	if params.State != nil {
+		d.State = *params.State
+	}
+	return validate(*d)
 }
 
 func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
