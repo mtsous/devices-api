@@ -56,7 +56,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	repo := postgres.NewDeviceRepository(pool)
 
-	deviceService := device.NewService(repo, logger)
+	deviceService := device.NewService(repo, logNotifier{logger: logger}, logger)
 
 	deviceHandler := device.NewHandler(deviceService, logger)
 
@@ -106,4 +106,18 @@ func serve(ctx context.Context, srv *http.Server, logger *slog.Logger) error {
 
 	logger.Info("server stopped")
 	return nil
+}
+
+// logNotifier logs state changes. It is a placeholder until state changes are
+// streamed to clients over SSE.
+type logNotifier struct {
+	logger *slog.Logger
+}
+
+func (n logNotifier) Notify(ctx context.Context, change device.StateChange) {
+	n.logger.InfoContext(ctx, "device state changed",
+		"device_id", change.DeviceID,
+		"previous_state", change.Previous,
+		"state", change.Current,
+	)
 }

@@ -10,17 +10,20 @@ import (
 )
 
 type Service struct {
-	repo   Repository
-	logger *slog.Logger
+	repo     Repository
+	notifier Notifier
+	logger   *slog.Logger
 }
 
 func NewService(
 	repo Repository,
+	notifier Notifier,
 	logger *slog.Logger,
 ) *Service {
 	return &Service{
-		repo:   repo,
-		logger: logger,
+		repo:     repo,
+		notifier: notifier,
+		logger:   logger,
 	}
 }
 
@@ -139,6 +142,14 @@ func (s *Service) Update(
 		"previous_state", previousState,
 		"state", updated.State,
 	)
+
+	if updated.State != previousState {
+		s.notifier.Notify(ctx, StateChange{
+			DeviceID: updated.ID,
+			Previous: previousState,
+			Current:  updated.State,
+		})
+	}
 
 	return updated, nil
 }

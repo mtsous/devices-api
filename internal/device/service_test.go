@@ -99,6 +99,15 @@ func (f *fakeRepository) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// fakeNotifier records the state changes it is asked to deliver.
+type fakeNotifier struct {
+	changes []StateChange
+}
+
+func (f *fakeNotifier) Notify(_ context.Context, change StateChange) {
+	f.changes = append(f.changes, change)
+}
+
 var (
 	errFakeRepo   = errors.New("fake repository error")
 	discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -202,7 +211,7 @@ func TestServiceCreate(t *testing.T) {
 			repo := newFakeRepository()
 			repo.createErr = tc.createErr
 
-			svc := NewService(repo, discardLogger)
+			svc := NewService(repo, &fakeNotifier{}, discardLogger)
 			got, err := svc.Create(context.Background(), tc.input)
 
 			if tc.wantErr != nil {
@@ -266,7 +275,7 @@ func TestServiceGet(t *testing.T) {
 			repo.devices[existing.ID] = existing
 			repo.getErr = tc.getErr
 
-			svc := NewService(repo, discardLogger)
+			svc := NewService(repo, &fakeNotifier{}, discardLogger)
 			got, err := svc.Get(context.Background(), tc.id)
 
 			if tc.wantErr != nil {
@@ -376,7 +385,7 @@ func TestServiceList(t *testing.T) {
 			repo.listResult = newTestDevices(tc.deviceCount)
 			repo.listErr = tc.listErr
 
-			svc := NewService(repo, discardLogger)
+			svc := NewService(repo, &fakeNotifier{}, discardLogger)
 			got, err := svc.List(context.Background(), tc.filter, tc.page)
 
 			if tc.wantErr != nil {
@@ -460,7 +469,7 @@ func TestServiceDelete(t *testing.T) {
 			repo.devices[device.ID] = device
 			repo.deleteErr = tc.deleteErr
 
-			svc := NewService(repo, discardLogger)
+			svc := NewService(repo, &fakeNotifier{}, discardLogger)
 			err := svc.Delete(context.Background(), device.ID)
 
 			if tc.wantErr != nil {
@@ -609,7 +618,7 @@ func TestServiceUpdate(t *testing.T) {
 				id = uuid.Must(uuid.NewV7())
 			}
 
-			svc := NewService(repo, discardLogger)
+			svc := NewService(repo, &fakeNotifier{}, discardLogger)
 			got, err := svc.Update(context.Background(), id, tc.params)
 
 			if repo.updateCalled != tc.wantRepoCalled {
@@ -668,7 +677,7 @@ func TestServiceUpdateErrorMessages(t *testing.T) {
 			repo := newFakeRepository()
 			repo.devices[tc.stored.ID] = tc.stored
 
-			svc := NewService(repo, discardLogger)
+			svc := NewService(repo, &fakeNotifier{}, discardLogger)
 			_, err := svc.Update(context.Background(), tc.stored.ID, tc.params)
 
 			if err == nil || err.Error() != tc.wantMsg {
@@ -683,11 +692,74 @@ func TestServiceUpdateErrorMessages(t *testing.T) {
 		repo.devices[stored.ID] = stored
 		repo.updateErr = errFakeRepo
 
-		svc := NewService(repo, discardLogger)
+		svc := NewService(repo, &fakeNotifier{}, discardLogger)
 		_, err := svc.Update(context.Background(), stored.ID, UpdateParams{Name: new("Galaxy")})
 
 		if want := "update device " + stored.ID.String() + ": " + errFakeRepo.Error(); err == nil || err.Error() != want {
 			t.Fatalf("Update() error = %v, want %q", err, want)
 		}
 	})
+}
+
+func TestServiceUpdateNotifies(t *testing.T) {
+	tests := []struct {
+		name      string
+		stored    Device
+		params    UpdateParams
+		updateErr error
+		want      []StateChange
+	}{
+		{
+			name:   "notifies state change with previous and new state",
+			stored: newTestDevice(StateAvailable),
+			params: UpdateParams{State: new(StateInUse)},
+			want:   []StateChange{{Previous: StateAvailable, Current: StateInUse}},
+		},
+		{
+			name:   "notifies when state changes along with other fields",
+			stored: newTestDevice(StateInactive),
+			params: UpdateParams{Name: new("Galaxy"), State: new(StateAvailable)},
+			want:   []StateChange{{Previous: StateInactive, Current: StateAvailable}},
+		},
+		{
+			name:   "does not notify a name-only change",
+			stored: newTestDevice(StateAvailable),
+			params: UpdateParams{Name: new("Galaxy")},
+		},
+		{
+			name:   "does not notify when the same state is sent",
+			stored: newTestDevice(StateInUse),
+			params: UpdateParams{State: new(StateInUse)},
+		},
+		{
+			name:   "does not notify a rejected update",
+			stored: newTestDevice(StateInUse),
+			params: UpdateParams{Name: new("Galaxy"), State: new(StateAvailable)},
+		},
+		{
+			name:      "does not notify when the repository fails",
+			stored:    newTestDevice(StateAvailable),
+			params:    UpdateParams{State: new(StateInUse)},
+			updateErr: errFakeRepo,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			repo.devices[tc.stored.ID] = tc.stored
+			repo.updateErr = tc.updateErr
+			notifier := &fakeNotifier{}
+
+			svc := NewService(repo, notifier, discardLogger)
+			_, _ = svc.Update(context.Background(), tc.stored.ID, tc.params)
+
+			for i := range tc.want {
+				tc.want[i].DeviceID = tc.stored.ID
+			}
+			if !slices.Equal(notifier.changes, tc.want) {
+				t.Fatalf("notifications = %+v, want %+v", notifier.changes, tc.want)
+			}
+		})
+	}
 }
