@@ -15,6 +15,7 @@ import (
 
 	"github.com/mtsous/devices-api/internal/config"
 	"github.com/mtsous/devices-api/internal/device"
+	"github.com/mtsous/devices-api/internal/docs"
 	"github.com/mtsous/devices-api/internal/health"
 	"github.com/mtsous/devices-api/internal/notify"
 	"github.com/mtsous/devices-api/internal/postgres"
@@ -65,6 +66,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		health.NewHandler(logger),
 		device.NewHandler(deviceService, logger),
 		notify.NewHandler(broker, logger),
+		docs.NewHandler(logger),
 	)
 	srv.RegisterOnShutdown(broker.Close)
 

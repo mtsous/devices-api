@@ -1,0 +1,376 @@
+openapi: 3.1.0
+info:
+  title: Devices API
+  version: 1.0.0
+  description: |
+    Create, read, update and delete devices, and subscribe to device state changes.
+
+    Rules:
+    - `created_at` is set by the server and can never be changed.
+    - `name` and `brand` cannot change while a device is `in-use`.
+    - Devices that are `in-use` cannot be deleted.
+    - Deleted devices are no longer returned by any endpoint.
+
+servers:
+  - url: http://localhost:8080
+    description: Local (`make run`)
+
+# The API has no authentication.
+security: []
+
+paths:
+  /devices:
+    post:
+      summary: Create a device
+      operationId: createDevice
+      tags: [devices]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDeviceRequest"
+            example:
+              name: iPhone 15
+              brand: Apple
+              state: available
+      responses:
+        "201":
+          description: Device created.
+          headers:
+            Location:
+              description: URL of the new device.
+              schema:
+                type: string
+                example: /devices/01a1d755-dce5-7cf4-a31f-feda7302e985
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      summary: List devices
+      operationId: listDevices
+      tags: [devices]
+      description: |
+        Returns devices ordered by creation, one page at a time. Filter by `brand` or by
+        `state`, not both. To get the next page, pass the response's `next_cursor` as `cursor`.
+      parameters:
+        - name: brand
+          in: query
+          description: Only devices of this brand. Case-insensitive.
+          schema:
+            type: string
+          example: Apple
+        - name: state
+          in: query
+          description: Only devices in this state.
+          schema:
+            $ref: "#/components/schemas/State"
+        - name: cursor
+          in: query
+          description: Return devices after this one. Use `next_cursor` from the previous page.
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          description: Page size. Values below 1 use the default; values above 100 are capped at 100.
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        "200":
+          description: A page of devices.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DevicePage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /devices/{id}:
+    parameters:
+      - $ref: "#/components/parameters/DeviceID"
+
+    get:
+      summary: Get a device
+      operationId: getDevice
+      tags: [devices]
+      responses:
+        "200":
+          description: The device.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      summary: Update a device
+      operationId: updateDevice
+      tags: [devices]
+      description: |
+        Partial update: only the fields sent are changed. Send every field for a full update.
+        `name` and `brand` cannot change while the device is `in-use`, based on its state before
+        this request. A state change notifies subscribers of `GET /devices/events`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateDeviceRequest"
+            example:
+              state: in-use
+      responses:
+        "200":
+          description: The updated device.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Device"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/InUse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      summary: Delete a device
+      operationId: deleteDevice
+      tags: [devices]
+      description: Devices that are `in-use` cannot be deleted.
+      responses:
+        "204":
+          description: Device deleted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/InUse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /devices/events:
+    get:
+      summary: Stream device state changes
+      operationId: streamDeviceEvents
+      tags: [events]
+      description: |
+        A Server-Sent Events stream. Each time a device's state changes, a `state-changed`
+        event is sent after the change is saved. Clients only receive events while connected;
+        missed events are not replayed. A `: keep-alive` comment is sent every 15 seconds.
+
+        ```
+        event: state-changed
+        data: {"device_id":"01a1d755-dce5-7cf4-a31f-feda7302e985","previous_state":"available","new_state":"in-use"}
+        ```
+      responses:
+        "200":
+          description: |
+            An open event stream. Each event's `data` is a JSON
+            [StateChangeEvent](#/components/schemas/StateChangeEvent).
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /healthz:
+    get:
+      summary: Liveness check
+      operationId: healthz
+      tags: [health]
+      responses:
+        "200":
+          description: The server is running.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+
+  /docs:
+    get:
+      summary: Interactive documentation for this API
+      operationId: docs
+      tags: [docs]
+      responses:
+        "200":
+          description: An HTML page rendering this specification.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /openapi.yml:
+    get:
+      summary: This specification
+      operationId: openapi
+      tags: [docs]
+      responses:
+        "200":
+          description: The OpenAPI document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+components:
+  parameters:
+    DeviceID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    State:
+      type: string
+      enum: [available, in-use, inactive]
+
+    Device:
+      type: object
+      required: [id, name, brand, state, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: UUIDv7, so ids sort by creation time.
+        name:
+          type: string
+        brand:
+          type: string
+        state:
+          $ref: "#/components/schemas/State"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          description: Omitted until the device is first updated.
+      example:
+        id: 01a1d755-dce5-7cf4-a31f-feda7302e985
+        name: iPhone 15
+        brand: Apple
+        state: available
+        created_at: "2026-01-01T12:00:00Z"
+
+    CreateDeviceRequest:
+      type: object
+      required: [name, brand]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+        brand:
+          type: string
+          minLength: 1
+        state:
+          $ref: "#/components/schemas/State"
+          description: Defaults to `inactive`.
+
+    UpdateDeviceRequest:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      description: Send at least one field. Unknown fields, such as `created_at`, are rejected.
+      properties:
+        name:
+          type: string
+          minLength: 1
+        brand:
+          type: string
+          minLength: 1
+        state:
+          $ref: "#/components/schemas/State"
+
+    DevicePage:
+      type: object
+      required: [devices]
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/Device"
+        count:
+          type: integer
+          description: Number of devices in this page. Omitted when the page is empty.
+        next_cursor:
+          type: string
+          format: uuid
+          description: Pass as `cursor` to get the next page. Omitted on the last page.
+
+    StateChangeEvent:
+      type: object
+      required: [device_id, previous_state, new_state]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        previous_state:
+          $ref: "#/components/schemas/State"
+        new_state:
+          $ref: "#/components/schemas/State"
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+  responses:
+    BadRequest:
+      description: |
+        Invalid request: malformed JSON or unknown fields, malformed id, cursor or limit,
+        missing name or brand, invalid state, or filtering by brand and state together.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "invalid device input: name is required"
+    NotFound:
+      description: The device does not exist or was deleted.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: device not found
+    InUse:
+      description: The device is in use, so it cannot be deleted or have its name or brand changed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: device is in use
+    InternalError:
+      description: Unexpected server error. Details are logged, not returned.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: internal server error
