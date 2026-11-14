@@ -16,6 +16,7 @@ import (
 	"github.com/mtsous/devices-api/internal/config"
 	"github.com/mtsous/devices-api/internal/device"
 	"github.com/mtsous/devices-api/internal/health"
+	"github.com/mtsous/devices-api/internal/notify"
 	"github.com/mtsous/devices-api/internal/postgres"
 	"github.com/mtsous/devices-api/internal/router"
 )
@@ -56,24 +57,26 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	repo := postgres.NewDeviceRepository(pool)
 
-	deviceService := device.NewService(repo, logNotifier{logger: logger}, logger)
+	broker := notify.NewBroker(logger)
 
-	deviceHandler := device.NewHandler(deviceService, logger)
+	deviceService := device.NewService(repo, broker, logger)
 
-	srv := newServer(cfg, logger, deviceHandler)
+	srv := newServer(cfg, logger,
+		health.NewHandler(logger),
+		device.NewHandler(deviceService, logger),
+		notify.NewHandler(broker, logger),
+	)
+	// Event streams never end on their own; closing the broker ends them so
+	// Shutdown does not wait for its timeout.
+	srv.RegisterOnShutdown(broker.Close)
 
 	return serve(ctx, srv, logger)
 }
 
-func newServer(cfg config.Config, logger *slog.Logger, deviceHandler *device.Handler) *http.Server {
-	handler := router.New(
-		health.NewHandler(logger),
-		deviceHandler,
-	)
-
+func newServer(cfg config.Config, logger *slog.Logger, registrars ...router.RouteRegistrar) *http.Server {
 	return &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           handler,
+		Handler:           router.New(registrars...),
 		ReadHeaderTimeout: 5 * time.Second,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
@@ -106,18 +109,4 @@ func serve(ctx context.Context, srv *http.Server, logger *slog.Logger) error {
 
 	logger.Info("server stopped")
 	return nil
-}
-
-// logNotifier logs state changes. It is a placeholder until state changes are
-// streamed to clients over SSE.
-type logNotifier struct {
-	logger *slog.Logger
-}
-
-func (n logNotifier) Notify(ctx context.Context, change device.StateChange) {
-	n.logger.InfoContext(ctx, "device state changed",
-		"device_id", change.DeviceID,
-		"previous_state", change.Previous,
-		"state", change.Current,
-	)
 }
