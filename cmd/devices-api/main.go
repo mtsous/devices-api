@@ -66,8 +66,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		device.NewHandler(deviceService, logger),
 		notify.NewHandler(broker, logger),
 	)
-	// Event streams never end on their own; closing the broker ends them so
-	// Shutdown does not wait for its timeout.
 	srv.RegisterOnShutdown(broker.Close)
 
 	return serve(ctx, srv, logger)
