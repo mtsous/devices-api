@@ -9,11 +9,10 @@ down:
 psql:
 	docker compose exec postgres psql -U devices
 
+# Ignores Postgres integration tests, because there is no test database.
 test:
 	go test -v -cover -count=1 ./...
 
-# Runs all tests, including Postgres integration tests, inside containers.
-# The test database is removed afterwards; the exit code is the tests' result.
 test-container:
 	docker compose --profile test run --rm test; \
 	status=$$?; \
